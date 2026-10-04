@@ -1,8 +1,9 @@
-const DEFAULT_SPEAK_STAFF_ROLE_ID = '1536253284309008445';
+const { PermissionFlagsBits } = require('discord.js');
+
 const STAFF_DENIED_MESSAGE = 'Isso é para staff, sai daqui kkk';
 
 function getSpeakStaffRoleId() {
-  return process.env.SPEAK_STAFF_ROLE_ID || DEFAULT_SPEAK_STAFF_ROLE_ID;
+  return process.env.SPEAK_STAFF_ROLE_ID || '';
 }
 
 function getIsekayUserIds() {
@@ -17,12 +18,18 @@ function isIsekayUser(userId) {
   return getIsekayUserIds().includes(String(userId));
 }
 
-function isSpeakStaff(member) {
+function isSpeakStaff(member, profile) {
   if (isIsekayUser(member?.id || member?.user?.id)) return true;
-  const staffRoleId = getSpeakStaffRoleId();
+  if (member?.permissions?.has?.(PermissionFlagsBits.Administrator)
+    || member?.permissions?.has?.(PermissionFlagsBits.ManageGuild)) return true;
+  const staffRoleIds = [
+    getSpeakStaffRoleId(),
+    ...(profile?.permissions?.roleIds || []),
+    ...(profile?.permissions?.areas?.general?.roleIds || []),
+  ].filter(Boolean);
   const roles = member?.roles?.cache;
-  return Boolean(staffRoleId && (roles?.has?.(staffRoleId)
-    || roles?.some?.((role) => role.id === staffRoleId)));
+  return Boolean(roles && staffRoleIds.some((roleId) => roles.has?.(roleId)
+    || roles.some?.((role) => role.id === roleId)));
 }
 
 function isExplicitlyAuthorizedUser(member, userId, profile, area = 'general') {
@@ -43,7 +50,7 @@ function isExplicitlyAuthorizedUser(member, userId, profile, area = 'general') {
 function hasSpeakAdminAccess(member, userId, profile, area = 'general') {
   if (!member || !userId) return false;
   const isOwner = isIsekayUser(userId);
-  return isOwner || isSpeakStaff(member) || isExplicitlyAuthorizedUser(member, userId, profile, area);
+  return isOwner || isSpeakStaff(member, profile) || isExplicitlyAuthorizedUser(member, userId, profile, area);
 }
 
 function canAccessAdminArea(member, userId, profile, area = 'general') {

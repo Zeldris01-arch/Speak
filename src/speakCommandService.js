@@ -1,20 +1,18 @@
 const { commands } = require('./commands');
-const { SERVER_CHANNELS } = require('./config/defaults');
+const { SERVER_CHANNELS, getConfiguredChannel } = require('./config/defaults');
 const { answerSpeakMessage } = require('./conversationService');
-const { createSalaDoFuturoPayload } = require('./salaDoFuturoService');
 
 const COMMAND_CATEGORIES = [
-  ['🤖 IA', ['oi']],
-  ['📍 Canais', ['canais', 'ondefica']],
-  ['🎫 Atendimento', ['ticket', 'login', 'reset']],
+  ['📍 Canais', ['canais', 'cone-onde-fica']],
+  ['🎫 Atendimento', ['ticket']],
   ['📦 Acesso', ['up', 'down', 'ver']],
-  ['🛠️ Staff', ['clear', 'anuncio', 'promocao']],
+  ['🛠️ Staff', ['root-clear', 'cone-clear', 'up', 'down', 'ver', 'anuncio', 'promocao', 'cone-visor', 'coneondeficaconfig-add']],
   ['⚙️ Configuração', ['config', 'painel']],
   ['💳 Apoiador', ['apoiador-painel']],
-  ['📚 Informações', ['ping', 'help', 'commands', 'status', 'speak', 'saladofuturo', 'cmsp', 'sala-do-futuro']],
+  ['📚 Informações', ['ping', 'help', 'commands', 'status']],
 ];
 const STAFF_COMMANDS = new Set([
-  'clear', 'config', 'painel', 'up', 'down', 'ver', 'anuncio', 'promocao',
+  'root-clear', 'cone-clear', 'config', 'painel', 'up', 'down', 'ver', 'anuncio', 'promocao', 'coneondeficaconfig-add',
 ]);
 const CHANNEL_ALIASES = Object.freeze({
   handouts: ['apostila', 'apostilas'],
@@ -47,66 +45,80 @@ function normalizeText(value) {
     .trim();
 }
 
-function getChannelByName(value) {
+function getChannelByName(value, profile) {
   const normalized = normalizeText(value);
+  const customChannel = profile?.general?.customChannels?.find((channel) =>
+    ` ${normalized} `.includes(` ${normalizeText(channel.name)} `));
+  if (customChannel) return { info: { name: customChannel.name, emoji: '📍' }, channel: customChannel };
   for (const [key, aliases] of Object.entries(CHANNEL_ALIASES)) {
-    const channel = SERVER_CHANNELS[key];
     if (aliases.some((alias) => ` ${normalized} `.includes(` ${alias} `))) {
-      return channel;
+      return { info: SERVER_CHANNELS[key], channel: getConfiguredChannel(profile, key) };
     }
   }
   return null;
 }
 
-function getLocationReply(text, explicit = false) {
+function getLocationReply(text, explicit = false, profile) {
   const normalized = normalizeText(text);
   if (!explicit && !LOCATION_INTENT.test(normalized)) return null;
-  const channel = getChannelByName(normalized);
-  if (!channel && /sala do futuro|sala futuro/.test(normalized)) {
-    return `Não há um canal dedicado da Sala do Futuro configurado. Para orientação, use <#${SERVER_CHANNELS.aiHelp.id}>.`;
-  }
-  if (!channel) return null;
-  return `${channel.emoji} ${channel.name} fica aqui: <#${channel.id}>`;
+  const match = getChannelByName(normalized, profile);
+  if (!match) return null;
+  const { info: channelInfo, channel } = match;
+  if (!channel) return `${channelInfo.emoji} ${channelInfo.name} ainda não foi configurado neste servidor.`;
+  return `${channel.emoji || channelInfo.emoji || '📍'} ${channel.name} fica aqui: <#${channel.id}>`;
 }
 
 function getRegisteredSubcommands() {
-  const shu = commands.find((command) => command.name === 'shu');
-  return (shu?.options || []).filter((option) => option.type === 1);
+  const cone = commands.find((command) => command.name === 'cone');
+  return (cone?.options || []).filter((option) => option.type === 1);
 }
 
-function renderCommandName(name, format) {
+function renderCommandName(name, format, prefix = '!cone') {
+  if (name === 'cone-visor') return '/cone visor <id>';
+  if (name === 'cone-onde-fica') return '/cone onde-fica [nome]';
+  if (name === 'coneondeficaconfig-add') return '/coneondeficaconfig add <id> <nome>';
+  if (name === 'root-clear') return format === 'slash' ? '/clear <numero>' : `${prefix} clear <quantidade>`;
   if (name === 'apoiador-painel') return '/apoiador painel';
-  const prefixName = name === 'sala-do-futuro' ? 'sala do futuro' : name;
+  const prefixName = name;
   if (format === 'slash') {
-    if (name === 'clear') return '/clear <numero>';
-    if (name === 'ondefica') return '/shu ondefica <nome>';
-    if (name === 'painel') return '/apoiador painel <canal>';
-    if (['up', 'down'].includes(name)) return `/shu ${name} <usuario> <motivo>`;
-    if (name === 'ver') return '/shu ver <usuario>';
-    if (['anuncio', 'promocao'].includes(name)) return `/shu ${name} <texto>`;
-    return `/shu ${name}`;
+    if (name === 'cone-visor' || name === 'visor') return '/cone visor <id>';
+    if (name === 'cone-onde-fica' || name === 'onde-fica') return '/cone onde-fica [nome]';
+    const subcommand = name.startsWith('cone-') ? name.slice('cone-'.length) : name;
+    if (subcommand === 'clear') return '/cone clear <numero>';
+    if (['up', 'down'].includes(subcommand)) return `/cone ${subcommand} <usuario> <motivo>`;
+    if (subcommand === 'ver') return '/cone ver <usuario>';
+    if (['anuncio', 'promocao'].includes(subcommand)) return `/cone ${subcommand} <texto>`;
+    if (subcommand === 'painel') return '/cone painel <canal> · /apoiador painel <canal>';
+    return `/cone ${subcommand}`;
   }
-  if (name === 'clear') return '!s clear <quantidade>';
-  if (['up', 'down'].includes(name)) return `!s ${name} <usuário> <motivo>`;
-  if (name === 'ver') return '!s ver <usuário>';
-  if (['anuncio', 'promocao'].includes(name)) return `!s ${name} <texto>`;
-  if (name === 'ondefica') return '!s ondefica <canal>';
-  if (name === 'painel') return '!s painel <#canal> [normal|v2]';
-  return `!s ${prefixName}`;
+  if (name === 'clear' || name === 'cone-clear') return `${prefix} clear <quantidade>`;
+  if (['up', 'down', 'cone-up', 'cone-down'].includes(name)) return `${prefix} ${name.replace('cone-', '')} <usuário> <motivo>`;
+  if (name === 'ver' || name === 'cone-ver') return `${prefix} ver <usuário>`;
+  if (['anuncio', 'promocao', 'cone-anuncio', 'cone-promocao'].includes(name)) return `${prefix} ${name.replace('cone-', '')} <texto>`;
+  if (name === 'painel' || name === 'cone-painel') return `${prefix} painel <#canal> [normal|v2]`;
+  return `${prefix} ${prefixName}`;
 }
 
 function getRegisteredCommands() {
   const entries = [];
   for (const command of commands) {
-    if (command.name === 'clear') entries.push({ name: 'clear', description: command.description });
+    if (command.name === 'clear') entries.push({ name: 'root-clear', description: command.description });
     if (command.name === 'apoiador') {
       for (const subcommand of command.options || []) {
         if (subcommand.type === 1) entries.push({ name: subcommand.name, description: subcommand.description, format: 'supporter' });
       }
     }
-    if (command.name === 'shu') {
+    if (command.name === 'cone') {
       entries.push(...getRegisteredSubcommands().map((subcommand) => ({
-        name: subcommand.name,
+        name: subcommand.name === 'clear'
+          ? 'cone-clear'
+          : ['visor', 'onde-fica'].includes(subcommand.name) ? `cone-${subcommand.name}` : subcommand.name,
+        description: subcommand.description,
+      })));
+    }
+    if (command.name === 'coneondeficaconfig') {
+      entries.push(...command.options.map((subcommand) => ({
+        name: `coneondeficaconfig-${subcommand.name}`,
         description: subcommand.description,
       })));
     }
@@ -115,41 +127,51 @@ function getRegisteredCommands() {
   return entries;
 }
 
-function createCommandsMessage(format = 'prefix', summary = false) {
+function createCommandsMessage(format = 'prefix', summary = false, prefix = '!cone') {
   const entries = getRegisteredCommands();
-  const lines = ['📖 Comandos do SHU'];
+  const lines = ['📖 Comandos do Cone'];
   for (const [category, names] of COMMAND_CATEGORIES) {
     const categoryEntries = entries.filter((entry) => names.includes(entry.name))
-      .filter((entry) => !summary || ['oi', 'help', 'ping', 'status', 'canais', 'ondefica', 'config', 'painel', 'clear'].includes(entry.name));
+      .filter((entry) => !summary || ['help', 'ping', 'status', 'canais', 'config', 'painel', 'root-clear', 'cone-clear', 'cone-onde-fica', 'cone-visor'].includes(entry.name));
     if (!categoryEntries.length) continue;
     lines.push('', category);
     for (const entry of categoryEntries) {
       const staffNote = STAFF_COMMANDS.has(entry.name) ? ' (Staff)' : '';
-      lines.push(`${renderCommandName(entry.name, format)}${staffNote}\n${entry.description}`);
+      lines.push(`${renderCommandName(entry.name, format, prefix)}${staffNote}\n${entry.description}`);
     }
   }
   return lines.join('\n');
 }
 
-function getChannelsMessage() {
+function getChannelsMessage(profile) {
   const orderedKeys = [
     'handouts', 'essays', 'speak', 'matific', 'khanAcademy', 'nightExpansion',
     'professionalEducation', 'preparaSp', 'alura', 'openEnglish', 'leia',
     'tasks', 'reportCard', 'aiHelp', 'general', 'media', 'commands',
   ];
-  return orderedKeys.map((key) => {
-    const channel = SERVER_CHANNELS[key];
+  const lines = orderedKeys.flatMap((key) => {
+    const channel = getConfiguredChannel(profile, key);
+    if (!channel) return [];
     return `${channel.emoji} ${channel.name} → <#${channel.id}>`;
-  }).join('\n');
+  });
+  const listedIds = new Set(orderedKeys
+    .map((key) => getConfiguredChannel(profile, key)?.id)
+    .filter(Boolean));
+  for (const channel of profile?.general?.customChannels || []) {
+    if (listedIds.has(channel.id)) continue;
+    listedIds.add(channel.id);
+    lines.push(`📍 ${channel.name} → <#${channel.id}>`);
+  }
+  return lines.length ? lines.join('\n') : 'Nenhum canal foi configurado neste servidor.';
 }
 
 function buildSafeStatus(profile, ping = 0) {
   return [
-    '🤖 SPEAK online',
+    '🤖 Cone online',
     `IA: ${profile.ai?.enabled ? 'ON' : 'OFF'}`,
-    `Prefixo: !s`,
+    `Prefixo: ${profile.general?.prefix || '!cone'}`,
     `⚡ Latência: ${Number.isFinite(ping) ? `${Math.round(ping)} ms` : 'indisponível'}`,
-    `📍 Canais configurados: ${Object.keys(SERVER_CHANNELS).length}`,
+    `📍 Canais configurados: ${Object.values(profile.general?.channelIds || {}).filter(Boolean).length}`,
     `🎫 Tickets: ${profile.ticket?.categoryId ? 'ON' : 'OFF'}`,
     '💳 Pagamentos: OFF',
   ].join('\n');
@@ -159,32 +181,21 @@ async function dispatchSpeakText(text, context) {
   const normalized = normalizeText(text);
   const [firstWord, ...remainingWords] = normalized.split(' ');
   const argument = remainingWords.join(' ');
-  const location = getLocationReply(text)
-    || (firstWord === 'ondefica' ? getLocationReply(argument, true) : null);
+  const location = getLocationReply(text, false, context.profile);
   if (location) return { content: location, allowedMentions: { parse: [] } };
 
   if (normalized === 'ping') {
     return { content: `🏓 Pong! Latência do bot: ${Number.isFinite(context.ping) ? `${Math.round(context.ping)} ms` : 'indisponível'}.` };
   }
   if (normalized === 'help' || normalized === 'ajuda') {
-    return { content: createCommandsMessage(context.format, true) };
+    return { content: createCommandsMessage(context.format, true, context.profile?.general?.prefix || '!cone') };
   }
   if (normalized === 'commands' || normalized === 'comandos') {
-    return { content: createCommandsMessage(context.format) };
+    return { content: createCommandsMessage(context.format, false, context.profile?.general?.prefix || '!cone') };
   }
   if (normalized === 'status') return { content: buildSafeStatus(context.profile, context.ping) };
   if (normalized === 'canais' || normalized === 'channels') {
-    return { content: getChannelsMessage(), allowedMentions: { parse: [] } };
-  }
-  if (normalized === 'speak') {
-    return { content: `SPEAK é a plataforma de inglês da rede estadual de São Paulo, no contexto da Sala do Futuro. Canal SPEAK: <#${SERVER_CHANNELS.speak.id}>.`, allowedMentions: { parse: [] } };
-  }
-  if (normalized === 'cmsp') {
-    return { content: `O CMSP é uma plataforma educacional digital da rede estadual. Este servidor não tem procedimentos de acesso confirmados; peça orientação em <#${SERVER_CHANNELS.aiHelp.id}>.`, allowedMentions: { parse: [] } };
-  }
-  if (normalized === 'saladofuturo' || normalized === 'sala do futuro' || normalized === 'sala futuro'
-    || normalized === 'sala-do-futuro') {
-    return createSalaDoFuturoPayload();
+    return { content: getChannelsMessage(context.profile), allowedMentions: { parse: [] } };
   }
 
   const answer = await answerSpeakMessage({

@@ -18,7 +18,7 @@ const {
 const { handleAdminMessage } = require('./adminService');
 const { startExpirationWorker } = require('./accessExpirationService');
 const { dispatchSpeakText } = require('./speakCommandService');
-const { SERVER_CHANNELS } = require('./config/defaults');
+const { handleMessageSecurity, handleMemberJoin } = require('./securityService');
 
 const token = process.env.DISCORD_TOKEN;
 
@@ -29,6 +29,7 @@ if (!token) {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -51,22 +52,23 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || message.webhookId) return;
   try {
     if (await handleWorkspaceUpload(message, configStore)) return;
-    if (await handlePrefixClear(message, configStore)) return;
-    if (await handleAdminMessage(message, configStore)) return;
-
     if (!message.guild) return;
-    if (await handlePrefixWorkflow(message, configStore)) return;
+    const profile = await configStore.getActiveProfile(message.guild.id);
+    if (await handleMessageSecurity(message, profile)) return;
+    const prefix = profile.general.prefix || '!cone';
+    if (await handlePrefixClear(message, configStore, {}, prefix)) return;
+    if (await handleAdminMessage(message, configStore, prefix)) return;
+    if (await handlePrefixWorkflow(message, configStore, prefix)) return;
     const content = message.content.trim();
-    const prefixMatch = content.match(/^!s(?:\s+([\s\S]*))?$/i);
-    const legacyMatch = content.match(/^\?speak(?:\s+([\s\S]*))?$/i);
+    const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const prefixMatch = content.match(new RegExp(`^${escapedPrefix}(?:\\s+([\\s\\S]*))?$`, 'i'));
     const mentionPattern = new RegExp(`<@!?${client.user.id}>`, 'i');
     const mentioned = mentionPattern.test(content);
-    const aiChannelId = SERVER_CHANNELS.aiHelp.id;
-    const inAiChannel = message.channel.id === aiChannelId || message.channel.parentId === aiChannelId;
-    if (!prefixMatch && !legacyMatch && !mentioned && !inAiChannel) return;
+    const aiChannelId = profile.general.channelIds.aiHelp;
+    const inAiChannel = Boolean(aiChannelId && (message.channel.id === aiChannelId || message.channel.parentId === aiChannelId));
+    if (!prefixMatch && !mentioned && !inAiChannel) return;
 
-    const profile = await configStore.getActiveProfile(message.guild.id);
-    let question = prefixMatch ? prefixMatch[1] || '' : legacyMatch ? legacyMatch[1] || '' : content;
+    let question = prefixMatch ? prefixMatch[1] || '' : content;
     if (mentioned) question = question.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim();
     const payload = await dispatchSpeakText(question || 'oi', {
       format: 'prefix',
@@ -85,6 +87,13 @@ client.on(Events.MessageCreate, async (message) => {
       allowedMentions: { parse: [] },
     }).catch(() => {});
   }
+});
+
+client.on(Events.GuildMemberAdd, async (member) => {
+  try {
+    const profile = await configStore.getActiveProfile(member.guild.id);
+    await handleMemberJoin(member, profile);
+  } catch {}
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {

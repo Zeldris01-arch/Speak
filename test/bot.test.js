@@ -7,12 +7,12 @@ const { ButtonStyle, ChannelType, PermissionFlagsBits } = require('discord.js');
 
 const { commands } = require('../src/commands');
 const { AccessService } = require('../src/accessService');
-const { askSpeak, createConversationStore, FALLBACK_MESSAGE, getFallback, NIM_CHAT_COMPLETIONS_URL } = require('../src/aiService');
+const { askSpeak, buildSafeServerContext, createConversationStore, FALLBACK_MESSAGE, getFallback, NIM_CHAT_COMPLETIONS_URL } = require('../src/aiService');
 const { answerSpeakMessage, OFFLINE_MESSAGE } = require('../src/conversationService');
 const { dispatchSpeakText, createCommandsMessage } = require('../src/speakCommandService');
-const { SALA_DO_FUTURO_URL } = require('../src/salaDoFuturoService');
 const { SERVER_CHANNELS } = require('../src/config/defaults');
 const { sweepExpirations } = require('../src/accessExpirationService');
+const { createSalaDoFuturoPayload, SALA_DO_FUTURO_URL } = require('../src/salaDoFuturoService');
 const { validateCoupon, recordCouponUsage, handleCouponModal, handleCouponComponent } = require('../src/couponService');
 const {
   canManageRole,
@@ -34,6 +34,12 @@ const {
   handleTicketButton,
 } = require('../src/interactionHandler');
 const { isIsekayUser, isSpeakStaff } = require('../src/permissions');
+
+process.env.SPEAK_STAFF_ROLE_ID ||= '1536253284309008445';
+const TEST_CHANNEL_IDS = Object.fromEntries(Object.keys(SERVER_CHANNELS).map((key, index) => [
+  key,
+  String(10000000000000000n + BigInt(index)),
+]));
 
 async function createStore(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'speak-test-'));
@@ -165,16 +171,20 @@ function adminGuildFixture({ manageableRolePosition = 10, mentionEveryone = true
   };
 }
 
-test('registra os subcommands esperados dentro de /speak', () => {
+test('registra comandos do Cone sem raízes Shu/Speak ou subcomandos escolares', () => {
   const commandNames = commands.map((command) => command.name);
   assert.equal(new Set(commandNames).size, commandNames.length);
-  const speakCommand = commands.find((command) => command.name === 'speak');
-  const registered = speakCommand.options.map((option) => option.name);
+  assert.equal(commandNames.includes('shu'), false);
+  assert.equal(commandNames.includes('speak'), false);
+  const coneCommand = commands.find((command) => command.name === 'cone');
+  const registered = coneCommand.options.map((option) => option.name);
   for (const expected of [
-    'oi', 'ping', 'help', 'commands', 'status', 'canais', 'ondefica', 'speak',
-    'saladofuturo', 'cmsp', 'config', 'painel', 'login', 'reset', 'ticket',
-    'anuncio', 'promocao', 'ver', 'sala-do-futuro', 'up', 'down',
+    'ping', 'help', 'commands', 'status', 'canais', 'config', 'painel', 'ticket',
+    'clear', 'anuncio', 'promocao', 'ver', 'up', 'down', 'onde-fica', 'visor',
   ]) assert.ok(registered.includes(expected), `/${expected} está registrado`);
+  for (const removed of ['oi', 'ondefica', 'speak', 'saladofuturo', 'cmsp', 'login', 'reset', 'sala-do-futuro']) {
+    assert.equal(registered.includes(removed), false, `/${removed} não está registrado`);
+  }
   assert.equal(new Set(registered).size, registered.length);
   const clearCommand = commands.find((command) => command.name === 'clear');
   assert.equal(clearCommand.options[0].name, 'numero');
@@ -182,50 +192,149 @@ test('registra os subcommands esperados dentro de /speak', () => {
   assert.equal(clearCommand.options[0].max_value, 100);
 });
 
-test('IDs de todos os canais permanecem centralizados e corretos', () => {
-  assert.deepEqual(Object.values(SERVER_CHANNELS).map(({ id }) => id).sort(), [
-    '1536216132162424912', '1536216135173939231', '1536216147421167636',
-    '1536216154744291379', '1536216158389145632', '1536216161291866223',
-    '1536216163959185499', '1536216170393509971', '1536216173266346044',
-    '1536216176089243668', '1536216187241889832', '1536216193621430384',
-    '1536470011558760508', '1536470082983821424', '1538240309132009623',
-    '1545518119580074104', '1549732420507406346',
-  ].sort());
+test('o botão da Sala do Futuro aponta para o novo link da Zonde', () => {
+  assert.equal(SALA_DO_FUTURO_URL, 'https://zondesystems.netlify.app');
+  const payload = createSalaDoFuturoPayload();
+  assert.equal(payload.components[0].components[0].data.url, 'https://zondesystems.netlify.app');
 });
 
-test('prefixo e slash compartilham embed branco e link oficial da Sala do Futuro', async (t) => {
-  const context = {
-    format: 'prefix', guildId: 'guild-1', channelId: 'channel-1', userId: 'user-1',
-    profile: { ai: { enabled: true } }, ping: 20,
-  };
-  const prefixPayload = await dispatchSpeakText('sala do futuro', context);
-  const prefixAliasPayload = await dispatchSpeakText('sala futuro', context);
-  assert.deepEqual(prefixAliasPayload.embeds.map((embed) => embed.toJSON()), prefixPayload.embeds.map((embed) => embed.toJSON()));
-
+test('/cone visor aplica permissões e mostra somente informações públicas do membro', async (t) => {
   const store = await createStore(t);
-  const slashInteraction = interactionBase({
-    commandName: 'speak',
-    options: { getSubcommand: () => 'sala-do-futuro' },
-    reply: async (payload) => { slashInteraction.payload = payload; },
-  });
-  await handleChatCommand(slashInteraction, store);
-  const normalizePayload = (payload) => ({
-    embeds: payload.embeds.map((embed) => embed.toJSON()),
-    components: payload.components.map((component) => component.toJSON()),
-  });
-  assert.deepEqual(normalizePayload(prefixPayload), normalizePayload(slashInteraction.payload));
+  const cone = commands.find((command) => command.name === 'cone');
+  const visorCommand = cone.options.find((option) => option.name === 'visor');
+  assert.equal(visorCommand.options[0].name, 'id');
+  const memberId = '12345678901234567';
+  let fetchCount = 0;
+  const roles = new Map([
+    ['guild-1', { id: 'guild-1', name: '@everyone', position: 0 }],
+    ['role-1', { id: 'role-1', name: 'Equipe', position: 5 }],
+    ['role-2', { id: 'role-2', name: 'Moderador', position: 10 }],
+  ]);
+  const target = {
+    id: memberId,
+    displayName: 'Nome de Exibição',
+    joinedAt: new Date('2025-01-02T03:04:05Z'),
+    presence: { status: 'online' },
+    user: { id: memberId, username: 'usuario', globalName: 'Nome Global', bot: false },
+    roles: { cache: roles },
+    permissions: { has: (permission) => permission === PermissionFlagsBits.ManageMessages },
+  };
+  const guild = {
+    id: 'guild-1',
+    ownerId: 'server-owner',
+    members: { fetch: async (id) => { fetchCount += 1; return id === memberId ? target : null; } },
+  };
+  const makeInteraction = (id, { authorized = false, member = { roles: { cache: new Map() } } } = {}) => {
+    const interaction = interactionBase({
+      commandName: 'cone',
+      guild,
+      member,
+      memberPermissions: { has: (permission) => authorized && permission === PermissionFlagsBits.Administrator },
+      isChatInputCommand: () => true,
+      options: { getSubcommand: () => 'visor', getString: () => id },
+      reply: async (payload) => { interaction.payload = payload; },
+    });
+    return interaction;
+  };
 
-  const embed = prefixPayload.embeds[0].toJSON();
-  const button = prefixPayload.components[0].components[0].data;
-  assert.equal(embed.color, 0xffffff);
-  assert.equal(embed.title, '📚 Sala do Futuro');
-  assert.equal(embed.description, 'Para acessar a Sala do Futuro, clique no botão abaixo.');
-  assert.doesNotMatch(`${embed.title} ${embed.description}`, /https?:\/\//);
-  assert.equal(button.style, ButtonStyle.Link);
-  assert.equal(button.label, 'Acessar');
-  assert.equal(button.emoji.name, '🔗');
-  assert.equal(button.url, SALA_DO_FUTURO_URL);
-  assert.equal(button.url, 'https://saladofuturo.educacao.sp.gov.br/login-alunos');
+  const denied = makeInteraction(memberId);
+  await handleChatCommand(denied, store);
+  assert.equal(denied.payload.content, 'Você não possui permissão para utilizar este comando.');
+  assert.equal(fetchCount, 0);
+
+  const invalid = makeInteraction('abc', { authorized: true });
+  await handleChatCommand(invalid, store);
+  assert.equal(invalid.payload.content, 'Membro não encontrado.');
+  assert.equal(fetchCount, 0);
+
+  const visor = makeInteraction(memberId, { authorized: true });
+  await handleChatCommand(visor, store);
+  const embed = visor.payload.embeds[0].toJSON();
+  const embedText = embed.fields.map((field) => `${field.name}\n${field.value}`).join('\n');
+  assert.equal(embed.title, '👁️ Visor de Membro');
+  assert.match(embedText, /@usuario/);
+  assert.match(embedText, new RegExp(memberId));
+  assert.match(embedText, /Moderador/);
+  assert.match(embedText, /Equipe/);
+  assert.doesNotMatch(embedText, /@everyone/);
+  assert.match(embedText, /Online/);
+  assert.match(embedText, /Gerenciar mensagens/);
+
+  const missing = makeInteraction('12345678901234568', { authorized: true });
+  await handleChatCommand(missing, store);
+  assert.equal(missing.payload.content, 'Membro não encontrado.');
+});
+
+test('/cone onde-fica lista e busca canais cadastrados por staff em cada servidor', async (t) => {
+  const store = await createStore(t);
+  const coneCommand = commands.find((command) => command.name === 'cone');
+  assert.ok(coneCommand.options.some((option) => option.name === 'onde-fica'));
+  assert.ok(commands.some((command) => command.name === 'coneondeficaconfig'
+    && command.options.some((option) => option.name === 'add')));
+
+  const channelId = '12345678901234567';
+  const textChannel = { id: channelId, isTextBased: () => true };
+  const guild = { id: 'guild-1', channels: { fetch: async (id) => id === channelId ? textChannel : null } };
+  const addChannel = interactionBase({
+    commandName: 'coneondeficaconfig',
+    guild,
+    options: {
+      getSubcommand: () => 'add',
+      getString: (name) => name === 'id' ? channelId : 'Sala de Reforço',
+    },
+    reply: async (payload) => { addChannel.payload = payload; },
+  });
+  await handleChatCommand(addChannel, store);
+  assert.match(addChannel.payload.content, /Canal adicionado/);
+  assert.equal((await new ConfigStore(store.filePath).getActiveProfile('guild-1')).general.customChannels[0].name, 'Sala de Reforço');
+
+  const findChannel = interactionBase({
+    commandName: 'cone',
+    guild,
+    options: { getSubcommand: () => 'onde-fica', getString: () => 'sala de reforço' },
+    reply: async (payload) => { findChannel.payload = payload; },
+  });
+  await handleChatCommand(findChannel, store);
+  assert.equal(findChannel.payload.content, `📍 Sala de Reforço fica aqui: <#${channelId}>`);
+
+  for (const name of ['Sala do Futuro', 'CMSP']) {
+    const removedLegacyLocation = interactionBase({
+      commandName: 'cone',
+      guild,
+      options: { getSubcommand: () => 'onde-fica', getString: () => name },
+      reply: async (payload) => { removedLegacyLocation.payload = payload; },
+    });
+    await handleChatCommand(removedLegacyLocation, store);
+    assert.equal(removedLegacyLocation.payload.content, `Não encontrei o canal **${name}**.`);
+  }
+
+  const listChannels = interactionBase({
+    commandName: 'cone',
+    guild,
+    options: { getSubcommand: () => 'onde-fica', getString: () => null },
+    reply: async (payload) => { listChannels.payload = payload; },
+  });
+  await handleChatCommand(listChannels, store);
+  assert.ok(listChannels.payload.content.includes(`Sala de Reforço → <#${channelId}>`));
+
+  const unauthorized = interactionBase({
+    commandName: 'coneondeficaconfig',
+    guild,
+    member: { roles: { cache: new Map() } },
+    memberPermissions: { has: () => false },
+    options: { getSubcommand: () => 'add', getString: () => channelId },
+    reply: async (payload) => { unauthorized.payload = payload; },
+  });
+  await handleChatCommand(unauthorized, store);
+  assert.equal(unauthorized.payload.content, 'Isso é para staff, sai daqui kkk');
+  assert.equal((await store.getActiveProfile('another-guild')).general.customChannels.length, 0);
+});
+
+test('catálogo de canais mantém metadados sem IDs globais', async (t) => {
+  assert.equal(Object.keys(SERVER_CHANNELS).length, 17);
+  assert.ok(Object.values(SERVER_CHANNELS).every((channel) => !('id' in channel)));
+  const profile = await (await createStore(t)).getActiveProfile('new-guild');
+  assert.ok(Object.values(profile.general.channelIds).every((id) => id === ''));
 });
 
 test('o proprietário é carregado somente pela variável ISEKAY_USER_ID', () => {
@@ -300,7 +409,7 @@ test('workspace recebe ZIP e publica o arquivo no painel V2', async (t) => {
 
   let sentPanel;
   const panel = interactionBase({
-    commandName: 'speak',
+    commandName: 'cone',
     user: { id: ownerId },
     isChatInputCommand: () => true,
     options: {
@@ -386,7 +495,7 @@ test('todos os formulários de configuração produzem campos válidos para o Di
 test('configuração abre menus/modais, publica painel e mantém dados no armazenamento', async (t) => {
   const store = await createStore(t);
   const configReply = interactionBase({
-    commandName: 'speak',
+    commandName: 'cone',
     isChatInputCommand: () => true,
     options: { getSubcommand: () => 'config' },
     reply: async (payload) => { configReply.payload = payload; },
@@ -401,31 +510,54 @@ test('configuração abre menus/modais, publica painel e mantém dados no armaze
     update: async (payload) => { sectionSelect.payload = payload; },
   });
   await handleInteraction(sectionSelect, store);
-  assert.equal(sectionSelect.payload.components[0].components[0].data.custom_id, 'speak:config:sub:ticket');
+  assert.equal(sectionSelect.payload.components[0].components[0].data.custom_id, 'speak:config:tickets:edit:panel');
 
   const ticketSettings = interactionBase({
-    customId: 'speak:config:sub:ticket',
-    values: ['settings'],
-    isStringSelectMenu: () => true,
+    customId: 'speak:config:tickets:edit:category',
+    isButton: () => true,
     showModal: async (modal) => { ticketSettings.modal = modal; },
   });
   await handleComponent(ticketSettings, store);
-  assert.equal(ticketSettings.modal.data.custom_id, 'speak:config:save:ticket:settings');
+  assert.equal(ticketSettings.modal.data.custom_id, 'speak:config:tickets:save:category');
 
-  const modalValues = new Map([
-    ['categoryId', { customId: 'categoryId', value: '12345678901234567' }],
-    ['logsChannelId', { customId: 'logsChannelId', value: '23456789012345678' }],
-    ['staffRoleIds', { customId: 'staffRoleIds', value: '34567890123456789' }],
-    ['initialMessage', { customId: 'initialMessage', value: 'SPEAK — Atendimento' }],
-  ]);
   const ticketSettingsSubmit = interactionBase({
-    customId: 'speak:config:save:ticket:settings',
+    customId: 'speak:config:tickets:save:category',
     isModalSubmit: () => true,
-    fields: { fields: { map: (callback) => [...modalValues.values()].map(callback) } },
+    fields: { fields: { map: (callback) => [
+      { customId: 'categoryId', value: '12345678901234567' },
+    ].map(callback) } },
     reply: async (payload) => { ticketSettingsSubmit.payload = payload; },
   });
   await handleModal(ticketSettingsSubmit, store);
-  assert.equal(ticketSettingsSubmit.payload.content, 'Configuração salva.');
+  assert.equal(ticketSettingsSubmit.payload.content, 'Configuração de Tickets salva.');
+  const ticketLogsSubmit = interactionBase({
+    customId: 'speak:config:tickets:save:logs',
+    isModalSubmit: () => true,
+    fields: { fields: { map: (callback) => [
+      { customId: 'logsChannelId', value: '23456789012345678' },
+    ].map(callback) } },
+    reply: async (payload) => { ticketLogsSubmit.payload = payload; },
+  });
+  await handleModal(ticketLogsSubmit, store);
+  const ticketStaffSubmit = interactionBase({
+    customId: 'speak:config:tickets:save:staff',
+    isModalSubmit: () => true,
+    fields: { fields: { map: (callback) => [
+      { customId: 'staffRoleIds', value: '34567890123456789' },
+    ].map(callback) } },
+    reply: async (payload) => { ticketStaffSubmit.payload = payload; },
+  });
+  await handleModal(ticketStaffSubmit, store);
+  const ticketMessageSubmit = interactionBase({
+    customId: 'speak:config:tickets:save:message',
+    isModalSubmit: () => true,
+    fields: { fields: { map: (callback) => [
+      { customId: 'initialMessage', value: 'Central de atendimento.' },
+      { customId: 'closingMessage', value: 'Atendimento encerrado.' },
+    ].map(callback) } },
+    reply: async (payload) => { ticketMessageSubmit.payload = payload; },
+  });
+  await handleModal(ticketMessageSubmit, store);
   const adminLogsSubmit = interactionBase({
     customId: 'speak:config:save:general:settings',
     isModalSubmit: () => true,
@@ -440,12 +572,13 @@ test('configuração abre menus/modais, publica painel e mantém dados no armaze
   assert.equal(configuredTicket.ticket.categoryId, '12345678901234567');
   assert.equal(configuredTicket.ticket.logsChannelId, '23456789012345678');
   assert.deepEqual(configuredTicket.ticket.staffRoleIds, ['34567890123456789']);
-  assert.equal(configuredTicket.ticket.initialMessage, 'SPEAK — Atendimento');
+  assert.equal(configuredTicket.ticket.initialMessage, 'Central de atendimento.');
+  assert.equal(configuredTicket.ticket.closingMessage, 'Atendimento encerrado.');
 
   let sentPanel;
   const targetChannel = { id: 'text-channel', send: async (payload) => { sentPanel = payload; } };
   const panelCommand = interactionBase({
-    commandName: 'speak',
+    commandName: 'cone',
     isChatInputCommand: () => true,
     options: { getSubcommand: () => 'painel', getChannel: () => targetChannel },
     reply: async (payload) => { panelCommand.payload = payload; },
@@ -468,12 +601,102 @@ test('configuração abre menus/modais, publica painel e mantém dados no armaze
   assert.equal(savedProfile.admin.logChannelId, '45678901234567890');
 });
 
-test('!s config e !s painel reutilizam o handler autorizado do Slash', async (t) => {
+test('prefixo configurável exige !, persiste por servidor e Vínculos permanece reservado', async (t) => {
+  const store = await createStore(t);
+  assert.deepEqual((await store.getActiveProfile('guild-1')).ticket.staffRoleIds, []);
+  const prefixMenu = interactionBase({
+    customId: 'speak:config:section',
+    values: ['prefix'],
+    isStringSelectMenu: () => true,
+    showModal: async (modal) => { prefixMenu.modal = modal; },
+  });
+  await handleComponent(prefixMenu, store);
+  assert.equal(prefixMenu.modal.data.custom_id, 'speak:config:save:prefix:settings');
+
+  const submitPrefix = async (value) => {
+    const interaction = interactionBase({
+      customId: 'speak:config:save:prefix:settings',
+      isModalSubmit: () => true,
+      fields: { fields: { map: (callback) => [{ customId: 'prefix', value }].map(callback) } },
+      reply: async (payload) => { interaction.payload = payload; },
+    });
+    return { interaction, result: await handleModal(interaction, store) };
+  };
+  await submitPrefix('!cone');
+  assert.equal((await new ConfigStore(store.filePath).getActiveProfile('guild-1')).general.prefix, '!cone');
+  assert.equal((await store.getActiveProfile('another-guild')).general.prefix, '!cone');
+  await assert.rejects(() => submitPrefix('?c'), /deve começar com !/);
+  await assert.rejects(() => submitPrefix('cone'), /deve começar com !/);
+
+  const channelsSection = interactionBase({
+    customId: 'speak:config:section',
+    values: ['channels'],
+    isStringSelectMenu: () => true,
+    update: async (payload) => { channelsSection.payload = payload; },
+  });
+  await handleComponent(channelsSection, store);
+  assert.equal(channelsSection.payload.components[0].components[0].data.custom_id, 'speak:config:sub:channels');
+  const platformsModal = interactionBase({
+    customId: 'speak:config:sub:channels',
+    values: ['platforms'],
+    isStringSelectMenu: () => true,
+    showModal: async (modal) => { platformsModal.modal = modal; },
+  });
+  await handleComponent(platformsModal, store);
+  assert.equal(platformsModal.modal.data.custom_id, 'speak:config:save:channels:platforms');
+  const channelsSubmit = interactionBase({
+    customId: 'speak:config:save:channels:platforms',
+    isModalSubmit: () => true,
+    fields: { fields: { map: (callback) => [
+      { customId: 'channel_speak', value: TEST_CHANNEL_IDS.speak },
+    ].map(callback) } },
+    reply: async (payload) => { channelsSubmit.payload = payload; },
+  });
+  await handleModal(channelsSubmit, store);
+  assert.equal((await new ConfigStore(store.filePath).getActiveProfile('guild-1')).general.channelIds.speak, TEST_CHANNEL_IDS.speak);
+  const configuredLocation = await dispatchSpeakText('onde fica speak?', {
+    profile: await store.getActiveProfile('guild-1'), format: 'prefix', guildId: 'guild-1',
+  });
+  assert.equal(configuredLocation.content, `🎤 SPEAK fica aqui: <#${TEST_CHANNEL_IDS.speak}>`);
+  const unconfigured = await dispatchSpeakText('onde fica matific?', {
+    profile: await store.getActiveProfile('another-guild'), format: 'prefix', guildId: 'another-guild',
+  });
+  assert.match(unconfigured.content, /ainda não foi configurado neste servidor/);
+
+  const createMessage = (content) => {
+    const message = {
+      content,
+      author: { id: 'staff-user', username: 'staff' },
+      member: { roles: { cache: new Map([[process.env.SPEAK_STAFF_ROLE_ID || '1536253284309008445', { id: process.env.SPEAK_STAFF_ROLE_ID || '1536253284309008445' }]]) } },
+      guild: { id: 'guild-1', channels: { fetch: async () => null } },
+      channel: { id: 'source-channel' },
+      reply: async (payload) => { message.replyPayload = payload; },
+    };
+    return message;
+  };
+  const configuredPrefixMessage = createMessage('!cone ticket');
+  assert.equal(await handlePrefixWorkflow(configuredPrefixMessage, store, '!cone'), true);
+  assert.match(configuredPrefixMessage.replyPayload.content, /categoria de tickets/);
+  assert.equal(await handlePrefixWorkflow(createMessage('cone ticket'), store, '!cone'), false);
+  assert.equal(await handlePrefixWorkflow(createMessage('?cone ticket'), store, '!cone'), false);
+  assert.equal(await handlePrefixWorkflow(createMessage('!s ticket'), store, '!cone'), false);
+
+  const linksMenu = interactionBase({
+    customId: 'speak:config:section',
+    values: ['links'],
+    isStringSelectMenu: () => true,
+    update: async (payload) => { linksMenu.payload = payload; },
+  });
+  await handleComponent(linksMenu, store);
+  assert.match(linksMenu.payload.content, /ainda não está disponível/i);
+});
+
+test('!cone config e !cone painel reutilizam o handler autorizado do Slash', async (t) => {
   const store = await createStore(t);
   const unauthorizedConfig = interactionBase({
     user: { id: 'ordinary-user' },
     member: { roles: { cache: new Map() } },
-    commandName: 'speak',
+    commandName: 'cone',
     options: { getSubcommand: () => 'config' },
     isChatInputCommand: () => true,
     reply: async (payload) => { unauthorizedConfig.payload = payload; },
@@ -508,12 +731,12 @@ test('!s config e !s painel reutilizam o handler autorizado do Slash', async (t)
     },
   });
 
-  assert.equal(await handlePrefixWorkflow(staffMessage('!s config'), store), true);
+  assert.equal(await handlePrefixWorkflow(staffMessage('!cone config'), store), true);
   assert.equal(replies[0].components[0].components[0].data.custom_id, 'speak:config:section');
-  assert.equal(await handlePrefixWorkflow(staffMessage('!s painel <#77777777777777777>'), store), true);
+  assert.equal(await handlePrefixWorkflow(staffMessage('!cone painel <#77777777777777777>'), store), true);
   assert.equal(panelChannel.payload.embeds[0].data.color, 0xffffff);
 
-  await handlePrefixWorkflow(staffMessage('!s config', { roles: { cache: new Map() } }), store);
+  await handlePrefixWorkflow(staffMessage('!cone config', { roles: { cache: new Map() } }), store);
   assert.equal(replies.at(-1).content, 'Isso é para staff, sai daqui kkk');
 });
 
@@ -585,7 +808,7 @@ test('ticket fica privado para usuário/equipe e o fechamento remove acesso do u
     isButton: () => true,
     reply: async (payload) => { supportButton.payload = payload; },
   });
-  await handlePanelButton(supportButton, await store.getActiveProfile('guild-1'));
+  await handlePanelButton(supportButton, await store.getActiveProfile('guild-1'), store);
 
   const requesterPermissions = createOptions.permissionOverwrites.find((overwrite) => overwrite.id === requesterId);
   const staffPermissions = createOptions.permissionOverwrites.find((overwrite) => overwrite.id === staffRoleId);
@@ -618,11 +841,182 @@ test('ticket fica privado para usuário/equipe e o fechamento remove acesso do u
     reply: async (payload) => { closeButton.errorPayload = payload; },
   });
   await handleTicketButton(closeButton, await store.getActiveProfile('guild-1'));
+  assert.equal(ticketChannel.closed, undefined);
+  assert.match(closeButton.errorPayload.content, /tem certeza/i);
+  const confirmId = closeButton.errorPayload.components[0].components[0].data.custom_id;
+  const confirmClose = interactionBase({
+    customId: confirmId,
+    user: { id: requesterId, username: 'Test User' },
+    guild,
+    channel: ticketChannel,
+    isButton: () => true,
+    update: async (payload) => { confirmClose.payload = payload; },
+    reply: async (payload) => { confirmClose.errorPayload = payload; },
+  });
+  await handleTicketButton(confirmClose, await store.getActiveProfile('guild-1'), store);
   assert.deepEqual(ticketChannel.closed, {
     id: requesterId,
     permissions: { ViewChannel: false, SendMessages: false },
   });
-  assert.equal(closeButton.payload.content, 'Ticket fechado.');
+  assert.equal(confirmClose.payload.content, 'Este ticket foi fechado pela equipe.');
+});
+
+test('painel de Tickets publica, evita duplicidade, chama Staff e gera transcript ao fechar', async (t) => {
+  const store = await createStore(t);
+  const requesterId = '12345678901234567';
+  const staffRoleId = '34567890123456789';
+  const categoryId = '45678901234567890';
+  const panelChannelId = '56789012345678901';
+  const transcriptChannelId = '67890123456789012';
+  const logsChannelId = '78901234567890123';
+  await store.updateActiveProfile('guild-1', (profile) => {
+    profile.ticket.categoryId = categoryId;
+    profile.ticket.panelChannelId = panelChannelId;
+    profile.ticket.staffRoleIds = [staffRoleId];
+    profile.ticket.transcriptsEnabled = true;
+    profile.ticket.transcriptsChannelId = transcriptChannelId;
+    profile.ticket.logsChannelId = logsChannelId;
+  });
+
+  let panelPayload;
+  let ticketCreates = 0;
+  const panelChannel = {
+    id: panelChannelId,
+    isTextBased: () => true,
+    send: async (payload) => { panelPayload = payload; return { id: 'panel-message' }; },
+  };
+  const transcriptPosts = [];
+  const transcriptChannel = {
+    id: transcriptChannelId,
+    isTextBased: () => true,
+    send: async (payload) => { transcriptPosts.push(payload); },
+  };
+  const logPosts = [];
+  const logsChannel = {
+    id: logsChannelId,
+    isTextBased: () => true,
+    send: async (payload) => { logPosts.push(payload); },
+  };
+  const transcriptMessages = new Map([['message-1', {
+    id: 'message-1',
+    createdTimestamp: Date.parse('2025-02-03T04:05:06Z'),
+    author: { tag: 'requester#0001' },
+    content: 'Preciso de ajuda.',
+    attachments: new Map(),
+  }]]);
+  transcriptMessages.last = () => [...transcriptMessages.values()].at(-1);
+  const ticketChannel = {
+    id: 'ticket-channel',
+    parentId: categoryId,
+    topic: `speak-ticket:${requesterId}`,
+    send: async (payload) => { ticketChannel.lastPayload = payload; },
+    messages: { fetch: async () => transcriptMessages },
+    permissionOverwrites: { edit: async (id, permissions) => { ticketChannel.closed = { id, permissions }; } },
+  };
+  const category = { id: categoryId, type: ChannelType.GuildCategory };
+  const guild = {
+    id: 'guild-1',
+    roles: { everyone: { id: 'everyone' } },
+    channels: {
+      cache: { find: () => null },
+      fetch: async (id) => ({
+        [categoryId]: category,
+        [panelChannelId]: panelChannel,
+        [transcriptChannelId]: transcriptChannel,
+        [logsChannelId]: logsChannel,
+        'ticket-channel': ticketChannel,
+      })[id] || null,
+      create: async (options) => { ticketCreates += 1; ticketChannel.options = options; return ticketChannel; },
+    },
+  };
+  const staffId = process.env.SPEAK_STAFF_ROLE_ID;
+  const staffMember = { roles: { cache: new Map([[staffId, { id: staffId }]]) } };
+  const launch = interactionBase({
+    customId: 'speak:config:tickets:launch',
+    guild,
+    member: staffMember,
+    isButton: () => true,
+    reply: async (payload) => { launch.payload = payload; },
+  });
+  await handleComponent(launch, store);
+  assert.equal(launch.payload.content, `Painel de Tickets publicado em ${panelChannel}.`);
+  assert.equal(panelPayload.components[0].components[0].data.custom_id, 'speak:ticket:open');
+  assert.equal((await store.getActiveProfile('guild-1')).ticket.panelMessageId, 'panel-message');
+
+  const ticketSection = interactionBase({
+    customId: 'speak:config:section', values: ['ticket'],
+    isStringSelectMenu: () => true,
+    update: async (payload) => { ticketSection.payload = payload; },
+  });
+  await handleComponent(ticketSection, store);
+  assert.deepEqual(ticketSection.payload.components.map((row) => row.components.length), [5, 5, 4]);
+
+  const openTicket = async () => {
+    const interaction = interactionBase({
+      customId: 'speak:ticket:open',
+      user: { id: requesterId, username: 'requester' },
+      guild,
+      client: { user: { id: 'bot-user' } },
+      isButton: () => true,
+      reply: async (payload) => { interaction.payload = payload; },
+    });
+    await handleInteraction(interaction, store);
+    return interaction;
+  };
+  const opened = await openTicket();
+  assert.equal(ticketCreates, 1);
+  assert.equal(ticketChannel.options.parent, categoryId);
+  assert.ok(ticketChannel.options.permissionOverwrites.some((overwrite) => overwrite.id === staffRoleId));
+  assert.equal(opened.payload.content, `Seu ticket foi criado: ${ticketChannel}`);
+  const duplicate = await openTicket();
+  assert.match(duplicate.payload.content, /já possui um ticket aberto/);
+  assert.equal(ticketCreates, 1);
+
+  const callStaff = interactionBase({
+    customId: 'speak:ticket:call',
+    user: { id: requesterId },
+    guild,
+    channel: ticketChannel,
+    isButton: () => true,
+    reply: async (payload) => { callStaff.payload = payload; },
+  });
+  await handleTicketButton(callStaff, await store.getActiveProfile('guild-1'), store);
+  assert.deepEqual(ticketChannel.lastPayload.allowedMentions.roles, [staffRoleId]);
+  assert.equal(callStaff.payload.content, 'A equipe foi chamada.');
+  const cooldownCall = interactionBase({
+    customId: 'speak:ticket:call',
+    user: { id: requesterId },
+    guild,
+    channel: ticketChannel,
+    isButton: () => true,
+    reply: async (payload) => { cooldownCall.payload = payload; },
+  });
+  await handleTicketButton(cooldownCall, await store.getActiveProfile('guild-1'), store);
+  assert.match(cooldownCall.payload.content, /recentemente/);
+
+  const close = interactionBase({
+    customId: 'speak:ticket:close',
+    user: { id: requesterId },
+    guild,
+    channel: ticketChannel,
+    isButton: () => true,
+    reply: async (payload) => { close.payload = payload; },
+  });
+  await handleTicketButton(close, await store.getActiveProfile('guild-1'), store);
+  const closeConfirm = interactionBase({
+    customId: close.payload.components[0].components[0].data.custom_id,
+    user: { id: requesterId },
+    guild,
+    channel: ticketChannel,
+    isButton: () => true,
+    update: async (payload) => { closeConfirm.payload = payload; },
+  });
+  await handleTicketButton(closeConfirm, await store.getActiveProfile('guild-1'), store);
+  assert.equal(transcriptPosts.length, 1);
+  assert.match(transcriptPosts[0].files[0].name, /ticket-channel-transcript/);
+  assert.deepEqual(ticketChannel.closed, { id: requesterId, permissions: { ViewChannel: false, SendMessages: false } });
+  assert.equal((await store.getActiveProfile('guild-1')).ticket.records[0].status, 'closed');
+  assert.ok(logPosts.some((payload) => /Ticket fechado/.test(payload.content)));
 });
 
 test('acessos limitam duplicidade e quantidade; reset seletivo e contador sobrevivem a reinício', async (t) => {
@@ -675,7 +1069,8 @@ test('IA usa NVIDIA NIM com contexto educacional, protege dados e mantém fallba
     assert.equal(payload.model, 'z-ai/glm-5.3');
     assert.match(payload.messages[0].content, /Sala do Futuro/);
     assert.match(payload.messages[0].content, /CMSP/);
-    assert.match(payload.messages[0].content, /<#1536216176089243668>/);
+    assert.match(payload.messages[0].content, /Matific/);
+    assert.doesNotMatch(payload.messages[0].content, /<#[0-9]{17,20}>/);
 
     process.env.NVIDIA_API_KEY = 'nvidia-primary-key';
     await askSpeak('Como funciona o SPEAK?', config, fakeFetch);
@@ -713,9 +1108,17 @@ test('IA usa NVIDIA NIM com contexto educacional, protege dados e mantém fallba
 });
 
 test('fallback padrão é editável, respeitado e nunca ecoa uma credencial', () => {
-  assert.equal(FALLBACK_MESSAGE, 'Amigo, não sei responder isso KKK 😭 Vai no <#1536216193621430384> que eles te salvam.');
+  assert.equal(FALLBACK_MESSAGE, 'Amigo, não sei responder isso KKK 😭 Procure a equipe responsável pelo atendimento.');
   assert.equal(getFallback({ fallbackMessage: 'Resposta personalizada.' }), 'Resposta personalizada.');
   assert.equal(getFallback({ fallbackMessage: 'senha: valor-secreto' }), FALLBACK_MESSAGE);
+});
+
+test('contexto da IA usa somente os canais configurados no perfil do servidor', () => {
+  const configuredContext = buildSafeServerContext({
+    general: { channelIds: { speak: TEST_CHANNEL_IDS.speak } },
+  });
+  assert.match(configuredContext, new RegExp(`<#${TEST_CHANNEL_IDS.speak}>: SPEAK`));
+  assert.doesNotMatch(buildSafeServerContext({ general: { channelIds: {} } }), /<#[0-9]{17,20}>/);
 });
 
 test('controles IA salvam estado e IA desligada não chama o modelo', async (t) => {
@@ -790,13 +1193,13 @@ test('/clear bloqueia usuários não autorizados com resposta ephemeral antes de
   assert.equal(fetched, false);
 });
 
-test('!s clear usa a mesma autorização e apaga a resposta de negação após cinco segundos', async (t) => {
+test('!cone clear usa a mesma autorização e apaga a resposta de negação após cinco segundos', async (t) => {
   const store = await createStore(t);
   let deleted = false;
   let timer;
   let replyPayload;
   const message = {
-    content: '!s clear 10',
+    content: '!cone clear 10',
     author: { id: 'ordinary-user' },
     member: { roles: { cache: new Map() } },
     guild: { id: 'guild-1', members: { me: {} } },
@@ -824,11 +1227,11 @@ test('canais, localização, status e help usam o catálogo real e evitam NVIDIA
   let nvidiaCalls = 0;
   const context = {
     format: 'prefix', guildId: 'g', channelId: 'c', userId: 'u', ping: 42,
-    profile: { ai: { enabled: true }, ticket: { categoryId: '' } },
+    profile: { ai: { enabled: true }, ticket: { categoryId: '' }, general: { channelIds: TEST_CHANNEL_IDS } },
     ask: async () => { nvidiaCalls += 1; return 'resposta da IA'; },
   };
   const channelMessage = await dispatchSpeakText('canais', context);
-  for (const { id } of Object.values(SERVER_CHANNELS)) {
+  for (const id of Object.values(TEST_CHANNEL_IDS)) {
     assert.ok(channelMessage.content.includes(`<#${id}>`));
     assert.equal(channelMessage.content.replaceAll(`<#${id}>`, '').includes(id), false);
   }
@@ -838,12 +1241,12 @@ test('canais, localização, status e help usam o catálogo real e evitam NVIDIA
   const help = await dispatchSpeakText('help', context);
   const commandOutput = await dispatchSpeakText('commands', context);
   assert.match(help.content, /📍 Canais/);
-  assert.match(commandOutput.content, /!s clear <quantidade>/);
-  assert.match(commandOutput.content, /!s up <usuário> <motivo>/);
-  assert.match(commandOutput.content, /!s ticket/);
+  assert.match(commandOutput.content, /!cone clear <quantidade>/);
+  assert.match(commandOutput.content, /!cone up <usuário> <motivo>/);
+  assert.match(commandOutput.content, /!cone ticket/);
   const slashHelp = createCommandsMessage('slash');
-  for (const option of commands.find((command) => command.name === 'speak').options) {
-    assert.ok(slashHelp.includes(`/speak ${option.name}`), `help slash inclui /speak ${option.name}`);
+  for (const option of commands.find((command) => command.name === 'cone').options) {
+    assert.ok(slashHelp.includes(`/cone ${option.name}`), `help slash inclui /cone ${option.name}`);
   }
   assert.equal(nvidiaCalls, 0);
 });
@@ -852,20 +1255,20 @@ test('localizador resolve variações sem chamar IA e consultas como oi bb conti
   let nvidiaCalls = 0;
   const context = {
     format: 'prefix', guildId: 'location-guild', channelId: 'location-channel', userId: 'location-user',
-    profile: { ai: { enabled: true, fallbackMessage: FALLBACK_MESSAGE } },
+    profile: { ai: { enabled: true, fallbackMessage: FALLBACK_MESSAGE }, general: { channelIds: TEST_CHANNEL_IDS } },
     ask: async (question) => { nvidiaCalls += 1; return `Resposta natural para: ${question}`; },
   };
   const locations = [
-    ['mano onde fica o speak?', '🎤 SPEAK fica aqui: <#1536216154744291379>'],
-    ['onde fica speake', '🎤 SPEAK fica aqui: <#1536216154744291379>'],
-    ['onde fica speek?', '🎤 SPEAK fica aqui: <#1536216154744291379>'],
-    ['onde fica a matific?', '🧮 Matific fica aqui: <#1536216176089243668>'],
-    ['qual é o canal da mathfic', '🧮 Matific fica aqui: <#1536216176089243668>'],
-    ['onde está a redação?', '📝 Redação fica aqui: <#1536216158389145632>'],
-    ['onde vejo o boletim', '📊 Boletim fica aqui: <#1545518119580074104>'],
-    ['onde ficam as apostilas', '📚 Apostilas fica aqui: <#1536216187241889832>'],
-    ['onde faço minhas atividades?', '📋 Tarefas fica aqui: <#1549732420507406346>'],
-    ['me manda o canal do chat de ajuda', '💬 Ajuda IA fica aqui: <#1536216193621430384>'],
+    ['mano onde fica o speak?', `🎤 SPEAK fica aqui: <#${TEST_CHANNEL_IDS.speak}>`],
+    ['onde fica speake', `🎤 SPEAK fica aqui: <#${TEST_CHANNEL_IDS.speak}>`],
+    ['onde fica speek?', `🎤 SPEAK fica aqui: <#${TEST_CHANNEL_IDS.speak}>`],
+    ['onde fica a matific?', `🧮 Matific fica aqui: <#${TEST_CHANNEL_IDS.matific}>`],
+    ['qual é o canal da mathfic', `🧮 Matific fica aqui: <#${TEST_CHANNEL_IDS.matific}>`],
+    ['onde está a redação?', `📝 Redação fica aqui: <#${TEST_CHANNEL_IDS.essays}>`],
+    ['onde vejo o boletim', `📊 Boletim fica aqui: <#${TEST_CHANNEL_IDS.reportCard}>`],
+    ['onde ficam as apostilas', `📚 Apostilas fica aqui: <#${TEST_CHANNEL_IDS.handouts}>`],
+    ['onde faço minhas atividades?', `📋 Tarefas fica aqui: <#${TEST_CHANNEL_IDS.tasks}>`],
+    ['me manda o canal do chat de ajuda', `💬 Ajuda IA fica aqui: <#${TEST_CHANNEL_IDS.aiHelp}>`],
   ];
   for (const [question, expected] of locations) {
     assert.equal((await dispatchSpeakText(question, context)).content, expected);
@@ -885,24 +1288,27 @@ test('localizador resolve variações sem chamar IA e consultas como oi bb conti
   assert.equal(nvidiaCalls, naturalQuestions.length + 1);
 });
 
-test('/speak ondefica chama a mesma localização determinística do prefixo', async (t) => {
+test('/cone onde-fica usa a mesma localização determinística do prefixo', async (t) => {
   const store = await createStore(t);
+  await store.updateActiveProfile('guild-1', (profile) => {
+    profile.general.channelIds = { ...profile.general.channelIds, ...TEST_CHANNEL_IDS };
+  });
   const direct = await dispatchSpeakText('onde fica a redação?', {
     format: 'prefix', guildId: 'guild-1', channelId: 'channel-1', userId: 'user-1',
-    profile: { ai: { enabled: true } },
+    profile: { ai: { enabled: true }, general: { channelIds: TEST_CHANNEL_IDS } },
   });
   const slash = interactionBase({
-    commandName: 'speak',
+    commandName: 'cone',
     client: { ws: { ping: 15 } },
     options: {
-      getSubcommand: () => 'ondefica',
+      getSubcommand: () => 'onde-fica',
       getString: () => 'redacao',
     },
     reply: async (payload) => { slash.payload = payload; },
   });
   await handleChatCommand(slash, store);
   assert.equal(slash.payload.content, direct.content);
-  assert.equal(slash.payload.content, '📝 Redação fica aqui: <#1536216158389145632>');
+  assert.equal(slash.payload.content, `📝 Redação fica aqui: <#${TEST_CHANNEL_IDS.essays}>`);
 });
 
 test('subcommands públicos slash usam o dispatcher compartilhado e respondem uma vez', async (t) => {
@@ -922,16 +1328,16 @@ test('subcommands públicos slash usam o dispatcher compartilhado e respondem um
     globalThis.fetch = previousFetch;
   });
 
-  const names = ['oi', 'ping', 'help', 'commands', 'status', 'canais', 'speak', 'saladofuturo', 'cmsp', 'sala-do-futuro', 'ondefica'];
+  const names = ['ping', 'help', 'commands', 'status', 'canais'];
   for (const name of names) {
-    const text = name === 'ondefica' ? 'ondefica matific' : name;
+    const text = name;
     const expected = await dispatchSpeakText(text, {
       format: 'slash', guildId: 'guild-1', channelId: 'channel-1', userId: 'user-1',
       profile: await store.getActiveProfile('guild-1'), ping: 50,
     });
     let replyCount = 0;
     const interaction = interactionBase({
-      commandName: 'speak',
+      commandName: 'cone',
       client: { ws: { ping: 50 } },
       options: {
         getSubcommand: () => name,
@@ -948,7 +1354,7 @@ test('subcommands públicos slash usam o dispatcher compartilhado e respondem um
     assert.deepEqual(normalize(interaction.payload), normalize(expected), name);
     assert.equal(replyCount, 1, `${name} deve responder uma vez`);
   }
-  assert.equal(aiRequests, 2);
+  assert.equal(aiRequests, 0);
 });
 
 test('fala da IA não soube responder é editável e persiste em Falas', async (t) => {
@@ -1173,7 +1579,7 @@ test('Staff cria e configura cupons; aplicação valida limites sem consumir uso
   assert.equal(validateCoupon(profile, input).status, 'USER_LIMIT_REACHED');
 });
 
-test('!s up seleciona plano, aplica cargo, persiste expiração manual e registra log', async (t) => {
+test('!cone up seleciona plano, aplica cargo, persiste expiração manual e registra log', async (t) => {
   const store = await createStore(t);
   const fixture = adminGuildFixture();
   await store.updateActiveProfile(fixture.guildId, (profile) => {
@@ -1182,7 +1588,7 @@ test('!s up seleciona plano, aplica cargo, persiste expiração manual e registr
       description: 'Acesso', roleId: fixture.planRole.id, status: 'active' });
   });
 
-  assert.equal(await handleAdminMessage(fixture.message(`!s up ${fixture.targetId} correção manual`), store), true);
+  assert.equal(await handleAdminMessage(fixture.message(`!cone up ${fixture.targetId} correção manual`), store), true);
   const selectPayload = fixture.channelMessages.at(-1);
   assert.equal(selectPayload.components[0].components[0].data.custom_id.startsWith('speak:admin:up:'), true);
   const actionSelect = fixture.component(selectPayload.components[0].components[0].data.custom_id, {
@@ -1205,7 +1611,7 @@ test('!s up seleciona plano, aplica cargo, persiste expiração manual e registr
   assert.deepEqual(fixture.logMessages[0].allowedMentions.parse, []);
 });
 
-test('!s demote revoga acessos, remove cargos e registra motivo sem segredos', async (t) => {
+test('!cone demote revoga acessos, remove cargos e registra motivo sem segredos', async (t) => {
   const store = await createStore(t);
   const fixture = adminGuildFixture();
   fixture.roleIds.add(fixture.planRole.id);
@@ -1216,7 +1622,7 @@ test('!s demote revoga acessos, remove cargos e registra motivo sem segredos', a
       expiresAt: new Date(Date.now() + 100000).toISOString(), status: 'active' });
   });
 
-  await handleAdminMessage(fixture.message(`!s demote ${fixture.targetId} senha:secret-value ajuste`), store);
+  await handleAdminMessage(fixture.message(`!cone demote ${fixture.targetId} senha:secret-value ajuste`), store);
   assert.equal(fixture.roleIds.has(fixture.planRole.id), false);
   const saved = await new ConfigStore(store.filePath).getActiveProfile(fixture.guildId);
   assert.equal(saved.accesses[0].status, 'revoked');
@@ -1232,13 +1638,13 @@ test('anúncio não executa menções e promoção respeita sem ping/everyone/he
   const fixture = adminGuildFixture();
   await store.updateActiveProfile(fixture.guildId, (profile) => { profile.admin.logChannelId = fixture.logChannelId; });
 
-  await handleAdminMessage(fixture.message('!s anúncio @everyone atendimento SPEAK aberto'), store);
+  await handleAdminMessage(fixture.message('!cone anúncio @everyone atendimento SPEAK aberto'), store);
   const announcement = fixture.channelMessages.at(-1);
   assert.match(announcement.embeds[0].data.description, /@everyone/);
   assert.deepEqual(announcement.allowedMentions.parse, []);
 
   const slashAnnouncement = fixture.component('slash-announcement', {
-    commandName: 'speak',
+    commandName: 'cone',
     channelId: 'command-channel',
     options: {
       getSubcommand: () => 'anuncio',
@@ -1251,7 +1657,7 @@ test('anúncio não executa menções e promoção respeita sem ping/everyone/he
   assert.equal(slashAnnouncement.payload.embeds[0].data.color, 0xffffff);
 
   for (const [choice, expectedMention] of [['none', ''], ['everyone', '@everyone'], ['here', '@here']]) {
-    await handleAdminMessage(fixture.message('!s promoção SPEAK com @everyone no texto'), store);
+    await handleAdminMessage(fixture.message('!cone promoção SPEAK com @everyone no texto'), store);
     const control = fixture.channelMessages.at(-1);
     assert.deepEqual(control.allowedMentions.parse, []);
     const customId = control.components[0].components.find((button) => button.data.custom_id.endsWith(`:${choice}`)).data.custom_id;
@@ -1268,7 +1674,7 @@ test('anúncio não executa menções e promoção respeita sem ping/everyone/he
     assert.deepEqual(promotions.at(-1).allowedMentions.parse, expectedMention ? ['everyone'] : []);
   }
 
-  await handleAdminMessage(fixture.message('!s promoção campanha para cancelar'), store);
+  await handleAdminMessage(fixture.message('!cone promoção campanha para cancelar'), store);
   const cancelControl = fixture.channelMessages.at(-1);
   const cancelId = cancelControl.components[0].components.find((button) => button.data.custom_id.endsWith(':cancel')).data.custom_id;
   const cancel = fixture.component(cancelId, { update: async (payload) => { cancel.payload = payload; } });
@@ -1281,7 +1687,7 @@ test('anúncio não executa menções e promoção respeita sem ping/everyone/he
 test('usuário sem permissão não usa comandos administrativos e menção em massa exige autorização', async (t) => {
   const store = await createStore(t);
   const fixture = adminGuildFixture({ authorized: false });
-  const handled = await handleAdminMessage(fixture.message('!s anúncio privado'), store);
+  const handled = await handleAdminMessage(fixture.message('!cone anúncio privado'), store);
   assert.equal(handled, true);
   assert.equal(fixture.channelMessages[0].content, 'Isso é para staff, sai daqui kkk');
   assert.equal(fixture.channelMessages.some((payload) => payload.embeds), false);
@@ -1290,7 +1696,7 @@ test('usuário sem permissão não usa comandos administrativos e menção em ma
   await store.updateActiveProfile(authorized.guildId, (profile) => {
     profile.admin.logChannelId = authorized.logChannelId;
   });
-  await handleAdminMessage(authorized.message('!s promoção teste de permissão'), store);
+  await handleAdminMessage(authorized.message('!cone promoção teste de permissão'), store);
   const control = authorized.channelMessages.at(-1);
   const customId = control.components[0].components.find((button) => button.data.custom_id.endsWith(':everyone')).data.custom_id;
   const confirm = authorized.component(customId, { update: async () => {}, reply: async (payload) => { confirm.payload = payload; } });

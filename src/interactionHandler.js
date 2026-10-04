@@ -14,8 +14,8 @@ const {
 const { randomUUID } = require('node:crypto');
 
 const { ConfigStore } = require('./database/configStore');
-const { EMBED_COLORS } = require('./config/defaults');
-const { dispatchSpeakText } = require('./speakCommandService');
+const { EMBED_COLORS, SERVER_CHANNELS } = require('./config/defaults');
+const { dispatchSpeakText, getChannelsMessage, getLocationReply } = require('./speakCommandService');
 const { AccessService } = require('./accessService');
 const { getFallback } = require('./aiService');
 const { isSensitivePrompt } = require('./aiService');
@@ -50,6 +50,9 @@ const WORKSPACE_UPLOAD_TTL = 15 * 60 * 1000;
 const MAX_WORKSPACE_ARCHIVE_SIZE = 8 * 1024 * 1024;
 const CONFIG_SECTIONS = [
   ['general', '📦 Geral'],
+  ['channels', '📍 Canais do servidor'],
+  ['prefix', '⌨️ Prefixo'],
+  ['links', '🔗 Vínculos'],
   ['owner', '👑 Painel ADM'],
   ['panel', '🎨 Painel'],
   ['payment', '💳 Pagamentos'],
@@ -64,17 +67,25 @@ const CONFIG_SECTIONS = [
   ['announcements', '📢 Anúncios'],
   ['promotions', '🎉 Promoções'],
   ['permissions', '🔐 Permissões'],
+  ['security', '🛡️ Segurança'],
   ['system', '📁 Sistema/Dados'],
 ];
 
+const CHANNEL_GROUPS = [
+  ['platforms', 'Plataformas', ['speak', 'matific', 'khanAcademy', 'professionalEducation', 'preparaSp']],
+  ['resources', 'Materiais', ['alura', 'openEnglish', 'leia', 'handouts', 'essays']],
+  ['support', 'Apoio', ['reportCard', 'tasks', 'nightExpansion', 'aiHelp', 'general']],
+  ['community', 'Comunidade', ['media', 'commands']],
+];
+
 const PERMISSION_AREAS = [
-  ['general', 'Geral'], ['panel', 'Painel'], ['payments', 'Pagamentos'], ['coupons', 'Cupons'],
+  ['general', 'Geral'], ['channels', 'Canais do servidor'], ['panel', 'Painel'], ['payments', 'Pagamentos'], ['coupons', 'Cupons'],
   ['plans', 'Planos'], ['tickets', 'Tickets'], ['logs', 'Logs'], ['speakRole', 'Cargo SPEAK'], ['ai', 'IA'], ['workspace', 'SPEAK'],
   ['announcements', 'Anúncios'], ['promotions', 'Promoções'], ['system', 'Configurações salvas'],
 ];
 
 function configArea(section) {
-  return ({ payment: 'payments', ticket: 'tickets', phrases: 'ai' })[section] || section;
+  return ({ payment: 'payments', ticket: 'tickets', phrases: 'ai', prefix: 'general', links: 'general' })[section] || section;
 }
 
 function ephemeral() {
@@ -102,6 +113,8 @@ function ticketConfigControls(profile) {
       button('speak:config:tickets:test', 'Testar', '🔄'),
     ),
     new ActionRowBuilder().addComponents(
+      button('speak:config:tickets:edit:message', 'Mensagens', '💬'),
+      button('speak:config:tickets:edit:identity', 'Identidade', '🏷️'),
       button('speak:config:tickets:enabled:true', 'Ativar', '🟢', profile.ticket.enabled ? ButtonStyle.Success : ButtonStyle.Secondary),
       button('speak:config:tickets:enabled:false', 'Desativar', '🔴', profile.ticket.enabled ? ButtonStyle.Secondary : ButtonStyle.Danger),
     ),
@@ -142,6 +155,14 @@ function ticketConfigModal(profile, action) {
       textField('panelButtonLabel', 'Nome do botão', ticket.panelButtonLabel),
       textField('panelButtonEmoji', 'Emoji do botão', ticket.panelButtonEmoji),
     ],
+    message: [
+      textField('initialMessage', 'Mensagem inicial', ticket.initialMessage, TextInputStyle.Paragraph),
+      textField('closingMessage', 'Mensagem ao fechar', ticket.closingMessage, TextInputStyle.Paragraph),
+    ],
+    identity: [
+      textField('namePrefix', 'Prefixo do nome do ticket', ticket.namePrefix),
+      textField('closeButtonLabel', 'Texto do botão de fechamento', ticket.closeButtonLabel),
+    ],
   }[action] || [];
   return new ModalBuilder()
     .setCustomId(`speak:config:tickets:save:${action}`)
@@ -152,7 +173,7 @@ function ticketConfigModal(profile, action) {
 function ticketPanelPayload(profile) {
   const ticket = profile.ticket;
   const embed = new EmbedBuilder()
-    .setColor(EMBED_COLORS.primary)
+    .setColor(ticket.panelColor || EMBED_COLORS.primary)
     .setTitle(ticket.panelTitle)
     .setDescription(ticket.panelDescription);
   if (ticket.panelImageUrl) embed.setImage(ticket.panelImageUrl);
@@ -191,8 +212,8 @@ function hasStaffRole(member, roleIds) {
 }
 
 function isAiChannelAllowed(interaction, profile) {
-  const allowedChannelId = profile.ai.channelId || profile.ticket.categoryId;
-    return Boolean(allowedChannelId && (interaction.channelId === allowedChannelId || interaction.channel?.parentId === allowedChannelId));
+  const allowedChannelId = profile.ai.channelId || profile.general.channelIds.aiHelp || profile.ticket.categoryId;
+  return Boolean(allowedChannelId && (interaction.channelId === allowedChannelId || interaction.channel?.parentId === allowedChannelId));
 }
 
 function configMenu(userId) {
@@ -213,7 +234,9 @@ function permissionsAreaMenu() {
 }
 
 function subMenu(section) {
-  const choices = section === 'panel'
+  const choices = section === 'channels'
+    ? CHANNEL_GROUPS.map(([value, label]) => [value, label])
+    : section === 'panel'
     ? [['content', 'Conteúdo'], ['appearance', 'Imagens e canal'], ['labels', 'Textos dos botões']]
     : section === 'ticket'
       ? [['settings', 'Configurações'], ['identity', 'Nome e fechamento']]
@@ -248,6 +271,17 @@ function joinIds(value) {
 }
 
 function modalFields(profile, section, subsection) {
+  if (section === 'prefix') return [
+    textField('prefix', 'Prefixo (deve começar com !)', profile.general.prefix || '!cone', TextInputStyle.Short, true),
+  ];
+  if (section === 'channels') {
+    const group = CHANNEL_GROUPS.find(([value]) => value === subsection);
+    return (group?.[2] || []).map((key) => textField(
+      `channel_${key}`,
+      `${SERVER_CHANNELS[key].name} (ID)`,
+      profile.general.channelIds[key],
+    ));
+  }
   if (section === 'general') return [
     textField('panelChannelId', 'Canal do painel (ID)', profile.panel.channelId),
     textField('speakRoleId', 'Cargo SPEAK (ID)', profile.speakRoleId),
@@ -328,6 +362,18 @@ function modalFields(profile, section, subsection) {
     textField('imageUrl', 'Imagem/GIF HTTPS (opcional)', profile.promotions.imageUrl),
     textField('footer', 'Rodapé', profile.promotions.footer),
   ];
+  if (section === 'security') return [
+    textField('securityEnabled', 'Proteção geral (true/false)', String(profile.security?.antiRaid?.enabled || profile.security?.antiSpam?.enabled || profile.security?.lockdown?.enabled || false)),
+    textField('raidEnabled', 'Anti-Raid ativo (true/false)', String(profile.security?.antiRaid?.enabled ?? false)),
+    textField('spamEnabled', 'Anti-Spam ativo (true/false)', String(profile.security?.antiSpam?.enabled ?? false)),
+    textField('floodEnabled', 'Anti-Flood ativo (true/false)', String(profile.security?.antiFlood?.enabled ?? false)),
+    textField('linkEnabled', 'Anti-Link ativo (true/false)', String(profile.security?.antiLink?.enabled ?? false)),
+    textField('inviteEnabled', 'Anti-Invite ativo (true/false)', String(profile.security?.antiInvite?.enabled ?? false)),
+    textField('botEnabled', 'Anti-Bot ativo (true/false)', String(profile.security?.antiBot?.enabled ?? false)),
+    textField('mentionEnabled', 'Proteção de menções (true/false)', String(profile.security?.mentionProtection?.enabled ?? false)),
+    textField('lockdownEnabled', 'Lockdown ativo (true/false)', String(profile.security?.lockdown?.enabled ?? false)),
+    textField('logChannelId', 'Canal de logs de segurança (ID)', profile.security?.logChannelId || profile.admin?.logChannelId || ''),
+  ];
   if (section === 'system') return [
     textField('payment', 'Emoji pagamento (unicode/custom)', profile.emojis.payment),
     textField('coupon', 'Emoji cupom (unicode/custom)', profile.emojis.coupon),
@@ -354,7 +400,7 @@ async function showConfigModal(interaction, profile, section, subsection = 'sett
       .setCustomId('speak:config:save:owner:console').setTitle('Painel ADM Isekay')
       .addComponents(
         new ActionRowBuilder().addComponents(
-          textField('ownerCommand', 'Comando ADM', '!s ver 123456789', TextInputStyle.Paragraph, true),
+          textField('ownerCommand', 'Comando ADM', '!cone ver 123456789', TextInputStyle.Paragraph, true),
         ),
       );
     await interaction.showModal(modal);
@@ -413,6 +459,12 @@ async function saveConfig(interaction, section, subsection, store) {
   const values = Object.fromEntries(interaction.fields.fields.map((field) => [field.customId, field.value.trim()]));
   const optionalIdFields = ['panelChannelId', 'speakRoleId', 'categoryId', 'logsChannelId', 'roleId', 'channelId', 'adminLogChannelId'];
   for (const key of optionalIdFields) if (key in values) values[key] = parseOptionalId(values[key]);
+  for (const key of Object.keys(values).filter((field) => field.startsWith('channel_'))) {
+    values[key] = parseOptionalId(values[key]);
+  }
+  if (values.prefix && !/^![^\s!][^\s]{0,14}$/.test(values.prefix)) {
+    throw new Error('O prefixo deve começar com ! e ter de 2 a 16 caracteres sem espaços.');
+  }
   for (const key of ['permissionUsers', 'permissionRoles', 'staffRoleIds', 'userIds', 'roleIds', 'allowedChannels']) {
     if (key in values) values[key] = parseIds(values[key]);
   }
@@ -439,6 +491,12 @@ async function saveConfig(interaction, section, subsection, store) {
   }
 
   await store.updateActiveProfile(interaction.guildId, (profile) => {
+    if (section === 'channels') {
+      for (const [key, value] of Object.entries(values)) {
+        profile.general.channelIds[key.slice('channel_'.length)] = value;
+      }
+      return;
+    }
     const mappings = {
       general: {
         panelChannelId: ['panel', 'channelId'],
@@ -447,6 +505,7 @@ async function saveConfig(interaction, section, subsection, store) {
         permissionRoles: ['permissions', 'roleIds'],
         adminLogChannelId: ['admin', 'logChannelId'],
       },
+      prefix: { prefix: ['general', 'prefix'] },
       logs: {
         adminLogChannelId: ['admin', 'logChannelId'],
         logsChannelId: ['ticket', 'logsChannelId'],
@@ -469,6 +528,18 @@ async function saveConfig(interaction, section, subsection, store) {
       promotions: {
         title: ['promotions', 'title'], imageUrl: ['promotions', 'imageUrl'],
         color: ['promotions', 'color'], footer: ['promotions', 'footer'],
+      },
+      security: {
+        securityEnabled: ['security', 'enabled'],
+        raidEnabled: ['security', 'antiRaid', 'enabled'],
+        spamEnabled: ['security', 'antiSpam', 'enabled'],
+        floodEnabled: ['security', 'antiFlood', 'enabled'],
+        linkEnabled: ['security', 'antiLink', 'enabled'],
+        inviteEnabled: ['security', 'antiInvite', 'enabled'],
+        botEnabled: ['security', 'antiBot', 'enabled'],
+        mentionEnabled: ['security', 'mentionProtection', 'enabled'],
+        lockdownEnabled: ['security', 'lockdown', 'enabled'],
+        logChannelId: ['security', 'logChannelId'],
       },
       system: Object.fromEntries(Object.keys(values).map((key) => [key, ['emojis', key]])),
       permissions: Object.fromEntries(Object.keys(values).map((key) => [key, ['permissions', 'areas', subsection, key]])),
@@ -506,6 +577,35 @@ async function saveConfig(interaction, section, subsection, store) {
         if (key === 'workspaceName') profile.workspace.name = value;
         else if (key === 'workspaceLanguage') profile.workspace.language = value || 'typescript';
         else if (key === 'workspaceCode') profile.workspace.script = value;
+      } else if (section === 'security') {
+        profile.security ??= {};
+        if (key === 'logChannelId') {
+          profile.security.logChannelId = value;
+        } else if (key === 'raidEnabled') {
+          profile.security.antiRaid ??= {};
+          profile.security.antiRaid.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'spamEnabled') {
+          profile.security.antiSpam ??= {};
+          profile.security.antiSpam.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'floodEnabled') {
+          profile.security.antiFlood ??= {};
+          profile.security.antiFlood.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'linkEnabled') {
+          profile.security.antiLink ??= {};
+          profile.security.antiLink.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'inviteEnabled') {
+          profile.security.antiInvite ??= {};
+          profile.security.antiInvite.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'botEnabled') {
+          profile.security.antiBot ??= {};
+          profile.security.antiBot.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'mentionEnabled') {
+          profile.security.mentionProtection ??= {};
+          profile.security.mentionProtection.enabled = value.toLowerCase() === 'true';
+        } else if (key === 'lockdownEnabled') {
+          profile.security.lockdown ??= {};
+          profile.security.lockdown.enabled = value.toLowerCase() === 'true';
+        }
       } else profile[destination[0]][destination[1]] = key === 'enabled' ? value.toLowerCase() === 'true' : value;
     }
   });
@@ -513,22 +613,115 @@ async function saveConfig(interaction, section, subsection, store) {
   await interaction.reply({ content: 'Configuração salva.', ...ephemeral() });
 }
 
-async function sendSafeLog(guild, profile, message) {
-  const channelId = profile.ticket.logsChannelId;
-  if (!channelId) return;
-  const channel = await guild.channels.fetch(channelId).catch(() => null);
-  if (channel?.isTextBased()) await channel.send({ content: message, allowedMentions: { parse: [] } });
+async function saveTicketConfig(interaction, action, store) {
+  const values = Object.fromEntries(interaction.fields.fields.map((field) => [field.customId, field.value.trim()]));
+  for (const key of ['categoryId', 'panelChannelId', 'logsChannelId', 'transcriptsChannelId', 'ratingsChannelId']) {
+    if (key in values) values[key] = parseOptionalId(values[key]);
+  }
+  if (values.staffRoleIds !== undefined) values.staffRoleIds = parseIds(values.staffRoleIds);
+  for (const key of ['panelImageUrl', 'panelThumbnailUrl']) {
+    if (key in values) values[key] = parseUrl(values[key]);
+  }
+  if (values.panelColor && !/^#[\da-f]{6}$/i.test(values.panelColor)) {
+    throw new Error('A cor deve estar no formato #RRGGBB.');
+  }
+  for (const key of ['transcriptsEnabled', 'ratingsEnabled', 'callsEnabled', 'preventDuplicates']) {
+    if (key in values && !['true', 'false'].includes(values[key].toLowerCase())) {
+      throw new Error(`${key} deve ser true ou false.`);
+    }
+  }
+  for (const key of ['panelTitle', 'panelDescription', 'panelButtonLabel', 'panelButtonEmoji']) {
+    if (key in values && !values[key]) throw new Error('Os campos do painel e do botão não podem ficar vazios.');
+  }
+  if (values.panelTitle?.length > 256 || values.panelDescription?.length > 4000
+    || values.initialMessage?.length > 2000 || values.panelButtonLabel?.length > 80) {
+    throw new Error('Um dos textos excede o limite permitido pelo Discord.');
+  }
+
+  await store.updateActiveProfile(interaction.guildId, (profile) => {
+    const destinations = {
+      panel: ['panelTitle', 'panelDescription', 'panelImageUrl', 'panelThumbnailUrl', 'panelColor'],
+      category: ['categoryId'],
+      staff: ['staffRoleIds'],
+      logs: ['panelChannelId', 'logsChannelId', 'transcriptsChannelId', 'ratingsChannelId'],
+      transcripts: ['transcriptsEnabled', 'transcriptsChannelId'],
+      ratings: ['ratingsEnabled', 'ratingsChannelId'],
+      calls: ['callsEnabled', 'preventDuplicates'],
+      button: ['panelButtonLabel', 'panelButtonEmoji'],
+      message: ['initialMessage', 'closingMessage'],
+      identity: ['namePrefix', 'closeButtonLabel'],
+    };
+    for (const key of destinations[action] || []) {
+      if (!(key in values)) continue;
+      const property = key.endsWith('Enabled') || key === 'preventDuplicates'
+        ? values[key].toLowerCase() === 'true'
+        : values[key];
+      profile.ticket[key] = property;
+    }
+  });
+  await interaction.reply({ content: 'Configuração de Tickets salva.', ...ephemeral() });
 }
 
-async function createTicket(interaction, profile) {
-  const category = await interaction.guild.channels.fetch(profile.ticket.categoryId).catch(() => null);
+async function sendSafeLog(guild, profile, message, files) {
+  const channelId = profile.ticket.logsChannelId;
+  if (!channelId) return;
+  try {
+    const channel = await guild.channels.fetch(channelId).catch(() => null);
+    if (channel?.isTextBased()) await channel.send({
+      content: message,
+      ...(files ? { files } : {}),
+      allowedMentions: { parse: [] },
+    });
+  } catch {}
+}
+
+async function createTicket(interaction, profile, store = configStore) {
+  if (!profile.ticket.enabled) {
+    await interaction.reply({ content: 'A abertura de Tickets está desativada neste servidor.', ...ephemeral() });
+    return;
+  }
+  const category = profile.ticket.categoryId
+    ? await interaction.guild.channels.fetch(profile.ticket.categoryId).catch(() => null)
+    : null;
   if (!category || category.type !== ChannelType.GuildCategory) {
     await interaction.reply({ content: 'A categoria de tickets não está configurada corretamente.', ...ephemeral() });
     return;
   }
 
+  const openRecord = (await store.getActiveProfile(interaction.guildId)).ticket.records
+    .find((record) => record.userId === interaction.user.id && ['opening', 'open'].includes(record.status));
+  const cachedTicket = interaction.guild.channels.cache?.find?.((channel) =>
+    channel.parentId === category.id && channel.topic?.startsWith(`speak-ticket:${interaction.user.id}`));
+  if (profile.ticket.preventDuplicates && (openRecord || cachedTicket)) {
+    const channel = openRecord?.channelId
+      ? await interaction.guild.channels.fetch(openRecord.channelId).catch(() => null)
+      : cachedTicket;
+    if (openRecord?.status === 'opening' || channel) {
+      await interaction.reply({ content: `Você já possui um ticket aberto${channel ? `: ${channel}` : ''}.`, ...ephemeral() });
+      return;
+    }
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      current.ticket.records = current.ticket.records.filter((record) => record.id !== openRecord.id);
+    });
+  }
+
+  const reservationId = randomUUID();
+  let duplicate = false;
+  await store.updateActiveProfile(interaction.guildId, (current) => {
+    if (current.ticket.preventDuplicates && current.ticket.records.some((record) =>
+      record.userId === interaction.user.id && ['opening', 'open'].includes(record.status))) {
+      duplicate = true;
+      return;
+    }
+    current.ticket.records.push({ id: reservationId, userId: interaction.user.id, status: 'opening', createdAt: Date.now() });
+  });
+  if (duplicate) {
+    await interaction.reply({ content: 'Você já possui um ticket aberto.', ...ephemeral() });
+    return;
+  }
+
   const safeName = interaction.user.username.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 45);
-  const prefix = profile.ticket.namePrefix.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30) || 'speak';
+  const prefix = (profile.ticket.namePrefix || 'ticket').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30) || 'ticket';
   const overwrites = [
     { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     {
@@ -539,36 +732,49 @@ async function createTicket(interaction, profile) {
       id: interaction.client.user.id,
       allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels],
     },
-    ...profile.ticket.staffRoleIds.map((id) => ({
+    ...(profile.ticket.staffRoleIds || []).map((id) => ({
       id,
       allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
     })),
   ];
-  const channel = await interaction.guild.channels.create({
-    name: `${prefix}-${safeName}`.slice(0, 95),
-    type: ChannelType.GuildText,
-    parent: category.id,
-    topic: `speak-ticket:${interaction.user.id}`,
-    permissionOverwrites: overwrites,
-  });
-  const controls = new ActionRowBuilder().addComponents(
-    button('speak:ticket:close', profile.ticket.closeButtonLabel || 'Fechar', '🔒', ButtonStyle.Danger),
-    button('speak:ticket:call', 'Chamar Staff', '📞', ButtonStyle.Secondary),
-    button('speak:ticket:claim', 'Assumir', '👤', ButtonStyle.Secondary),
-  );
-  const access = new ActionRowBuilder().addComponents(
-    button('speak:login', profile.panel.loginButtonLabel, configuredEmoji(profile.emojis.login, '🔐')),
-    button('speak:reset', profile.panel.resetButtonLabel, configuredEmoji(profile.emojis.reset, '🔄')),
-    button('speak:ticket:support', profile.panel.supportButtonLabel, '🎫'),
-    button('speak:ticket:ai', 'Perguntar à IA', '🤖'),
-  );
-  await channel.send({
-    content: `<@${interaction.user.id}>\n${profile.ticket.initialMessage || 'SPEAK — Atendimento'}`,
-    components: [controls, access],
-    allowedMentions: { users: [interaction.user.id] },
-  });
-  await interaction.reply({ content: `Seu ticket foi criado: ${channel}`, ...ephemeral() });
-  await sendSafeLog(interaction.guild, profile, `Ticket criado: ${channel} (usuário <@${interaction.user.id}>).`);
+  let channel;
+  try {
+    channel = await interaction.guild.channels.create({
+      name: `${prefix}-${safeName}`.slice(0, 95),
+      type: ChannelType.GuildText,
+      parent: category.id,
+      topic: `speak-ticket:${interaction.user.id}`,
+      permissionOverwrites: overwrites,
+    });
+    const controls = new ActionRowBuilder().addComponents(
+      button('speak:ticket:close', profile.ticket.closeButtonLabel || 'Fechar', '🔒', ButtonStyle.Danger),
+      button('speak:ticket:call', 'Chamar Staff', '📞', ButtonStyle.Secondary),
+      button('speak:ticket:claim', 'Assumir', '👤', ButtonStyle.Secondary),
+    );
+    const access = new ActionRowBuilder().addComponents(
+      button('speak:login', profile.panel.loginButtonLabel, configuredEmoji(profile.emojis.login, '🔐')),
+      button('speak:reset', profile.panel.resetButtonLabel, configuredEmoji(profile.emojis.reset, '🔄')),
+      button('speak:ticket:support', profile.panel.supportButtonLabel, '🎫'),
+      button('speak:ticket:ai', 'Perguntar à IA', '🤖'),
+    );
+    await channel.send({
+      content: `<@${interaction.user.id}>\n${profile.ticket.initialMessage || 'Central de Atendimento'}`,
+      components: [controls, access],
+      allowedMentions: { users: [interaction.user.id] },
+    });
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      const record = current.ticket.records.find((item) => item.id === reservationId);
+      if (record) Object.assign(record, { channelId: channel.id, status: 'open' });
+    });
+    await interaction.reply({ content: `Seu ticket foi criado: ${channel}`, ...ephemeral() });
+    await sendSafeLog(interaction.guild, profile, `Ticket criado: ${channel} (usuário <@${interaction.user.id}>).`);
+  } catch (error) {
+    if (channel) await channel.delete().catch(() => {});
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      current.ticket.records = current.ticket.records.filter((record) => record.id !== reservationId);
+    });
+    throw error;
+  }
 }
 
 async function showLogin(interaction, profile) {
@@ -628,7 +834,7 @@ async function handlePanelButton(interaction, profile, store = configStore) {
     return;
   }
   if (interaction.customId === 'speak:support') {
-    await createTicket(interaction, profile);
+    await createTicket(interaction, profile, store);
     return;
   }
   if (interaction.customId === 'speak:login') {
@@ -638,32 +844,168 @@ async function handlePanelButton(interaction, profile, store = configStore) {
   if (interaction.customId === 'speak:reset') await showReset(interaction);
 }
 
-async function handleTicketButton(interaction, profile) {
+async function createTicketTranscript(channel) {
+  const messages = [];
+  let before;
+  while (messages.length < 10_000) {
+    const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    if (!batch.size) break;
+    messages.push(...batch.values());
+    before = batch.last().id;
+    if (batch.size < 100) break;
+  }
+  const lines = messages.reverse().map((message) => {
+    const attachments = [...(message.attachments?.values?.() || [])].map((attachment) => attachment.url);
+    const content = [message.content, ...attachments].filter(Boolean).join(' ');
+    return `[${new Date(message.createdTimestamp).toISOString()}] ${message.author?.tag || message.author?.id || 'Usuário'}: ${content}`;
+  });
+  const transcript = lines.join('\n').slice(0, 1_500_000) || 'Nenhuma mensagem no ticket.';
+  return new AttachmentBuilder(Buffer.from(transcript, 'utf8'), { name: `ticket-${channel.id}-transcript.txt` });
+}
+
+async function handleTicketConfigButton(interaction, store) {
+  const actionMatch = interaction.customId.match(/^speak:config:tickets:edit:(panel|category|staff|logs|transcripts|ratings|calls|button|message|identity)$/);
+  if (!actionMatch && !['speak:config:tickets:launch', 'speak:config:tickets:test'].includes(interaction.customId)
+    && !/^speak:config:tickets:enabled:(true|false)$/.test(interaction.customId)) return false;
+
+  const profile = await store.getActiveProfile(interaction.guildId);
+  if (!canConfigure(interaction, profile, 'tickets')) {
+    await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
+    return true;
+  }
+  if (actionMatch) {
+    await interaction.showModal(ticketConfigModal(profile, actionMatch[1]));
+    return true;
+  }
+  if (interaction.customId.startsWith('speak:config:tickets:enabled:')) {
+    profile.ticket.enabled = interaction.customId.endsWith(':true');
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      current.ticket.enabled = profile.ticket.enabled;
+    });
+    await interaction.update({
+      content: '🎫 Configuração de Tickets',
+      components: ticketConfigControls(profile),
+    });
+    return true;
+  }
+  if (interaction.customId === 'speak:config:tickets:test') {
+    await interaction.reply({ ...ticketPanelPayload(profile), ...ephemeral() });
+    return true;
+  }
+
+  if (!profile.ticket.panelChannelId) {
+    await interaction.reply({ content: 'Configure o canal do painel antes de lançá-lo.', ...ephemeral() });
+    return true;
+  }
+  const channel = await interaction.guild.channels.fetch(profile.ticket.panelChannelId).catch(() => null);
+  if (!channel?.isTextBased()) {
+    await interaction.reply({ content: 'O canal configurado para o painel não é um canal de texto válido.', ...ephemeral() });
+    return true;
+  }
+  const panelMessage = await channel.send(ticketPanelPayload(profile));
+  await store.updateActiveProfile(interaction.guildId, (current) => {
+    current.ticket.panelMessageId = panelMessage.id;
+  });
+  await interaction.reply({ content: `Painel de Tickets publicado em ${channel}.`, ...ephemeral() });
+  return true;
+}
+
+async function handleTicketButton(interaction, profile, store = configStore) {
   const ownerId = interaction.channel.topic?.match(/^speak-ticket:(\d+)(?::\d+)?$/)?.[1];
   if (!ownerId) return await interaction.reply({ content: 'Este canal não é um ticket SPEAK válido.', ...ephemeral() });
   const isOwner = interaction.user.id === ownerId;
-  const isStaff = isSpeakStaff(interaction.member)
-    || hasStaffRole(interaction.member, profile.ticket.staffRoleIds)
+  const isStaff = isSpeakStaff(interaction.member, profile)
+    || hasStaffRole(interaction.member, profile.ticket.staffRoleIds || [])
     || interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels);
   if (interaction.customId === 'speak:ticket:close') {
     if (!isOwner && !isStaff) {
       await interaction.reply({ content: 'Você não pode fechar este ticket.', ...ephemeral() });
       return;
     }
+    await interaction.reply({
+      content: 'Tem certeza de que deseja fechar este ticket?',
+      components: [new ActionRowBuilder().addComponents(
+        button(`speak:ticket:close:confirm:${ownerId}:${interaction.user.id}`, 'Confirmar fechamento', '🔒', ButtonStyle.Danger),
+        button(`speak:ticket:close:cancel:${ownerId}:${interaction.user.id}`, 'Cancelar', '↩️'),
+      )],
+      ...ephemeral(),
+    });
+    return;
+  }
+  if (interaction.customId.startsWith('speak:ticket:close:cancel:')) {
+    const [, , , , ticketOwnerId, initiatorId] = interaction.customId.split(':');
+    if (ticketOwnerId !== ownerId || initiatorId !== interaction.user.id) {
+      await interaction.reply({ content: 'Esta confirmação pertence a outra pessoa.', ...ephemeral() });
+      return;
+    }
+    await interaction.update({ content: 'Fechamento cancelado.', components: [] });
+    return;
+  }
+  if (interaction.customId.startsWith('speak:ticket:close:confirm:')) {
+    const [, , , , ticketOwnerId, initiatorId] = interaction.customId.split(':');
+    if (ticketOwnerId !== ownerId || initiatorId !== interaction.user.id || (!isOwner && !isStaff)) {
+      await interaction.reply({ content: 'Esta confirmação pertence a outra pessoa.', ...ephemeral() });
+      return;
+    }
+    let transcript;
+    if (profile.ticket.transcriptsEnabled) {
+      const transcriptChannel = profile.ticket.transcriptsChannelId
+        ? await interaction.guild.channels.fetch(profile.ticket.transcriptsChannelId).catch(() => null)
+        : null;
+      if (!transcriptChannel?.isTextBased()) {
+        await interaction.reply({ content: 'Configure um canal de transcript válido antes de fechar este ticket.', ...ephemeral() });
+        return;
+      }
+      transcript = await createTicketTranscript(interaction.channel);
+      await transcriptChannel.send({
+        content: `Transcript do ticket ${interaction.channel} (usuário <@${ownerId}>).`,
+        files: [transcript],
+        allowedMentions: { parse: [] },
+      });
+    }
     await interaction.channel.permissionOverwrites.edit(ownerId, { ViewChannel: false, SendMessages: false });
-    await interaction.update({ content: 'Ticket fechado.', components: [] });
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      const record = current.ticket.records.find((item) => item.channelId === interaction.channel.id);
+      if (record) Object.assign(record, { status: 'closed', closedAt: Date.now(), closedBy: interaction.user.id });
+    });
+    await interaction.update({ content: profile.ticket.closingMessage || 'Ticket fechado.', components: [] });
     await sendSafeLog(interaction.guild, profile, `Ticket fechado: ${interaction.channel} (usuário <@${ownerId}>).`);
+    if (profile.ticket.deleteAfterClose) await interaction.channel.delete().catch(() => {});
     return;
   }
   if (interaction.customId === 'speak:ticket:call') {
-    if (!profile.ticket.staffRoleIds.length) {
+    if (!isOwner && !isStaff) {
+      await interaction.reply({ content: 'Somente o usuário e a equipe do ticket podem chamar a Staff.', ...ephemeral() });
+      return;
+    }
+    if (profile.ticket.callsEnabled === false) {
+      await interaction.reply({ content: 'As chamadas da equipe estão desativadas.', ...ephemeral() });
+      return;
+    }
+    const roleIds = profile.ticket.staffRoleIds || [];
+    if (!roleIds.length) {
       await interaction.reply({ content: 'A equipe de atendimento ainda não está configurada.', ...ephemeral() });
       return;
     }
-    const roleMentions = profile.ticket.staffRoleIds.map((id) => `<@&${id}>`).join(' ');
+    const cooldown = 5 * 60 * 1000;
+    const now = Date.now();
+    let coolingDown = false;
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      const lastCall = current.ticket.callCooldowns[interaction.channel.id] || 0;
+      if (now - lastCall < cooldown) {
+        coolingDown = true;
+        return;
+      }
+      current.ticket.callCooldowns[interaction.channel.id] = now;
+    });
+    if (coolingDown) {
+      await interaction.reply({ content: 'A equipe já foi chamada recentemente. Aguarde alguns minutos.', ...ephemeral() });
+      return;
+    }
+    const roleMentions = roleIds.map((id) => `<@&${id}>`).join(' ');
     await interaction.channel.send({
       content: `${roleMentions} Atendimento solicitado por <@${interaction.user.id}>.`,
-      allowedMentions: { roles: profile.ticket.staffRoleIds, users: [interaction.user.id] },
+      allowedMentions: { roles: roleIds, users: [interaction.user.id] },
     });
     await interaction.reply({ content: 'A equipe foi chamada.', ...ephemeral() });
     return;
@@ -709,14 +1051,131 @@ async function handleChatCommand(interaction, store) {
     await handleClearCommand(interaction, store);
     return;
   }
-  if (!['shu', 'speak', 'apoiador'].includes(interaction.commandName)) return;
+  if (!['cone', 'coneondeficaconfig', 'apoiador'].includes(interaction.commandName)) return;
   if (!interaction.guildId) {
     await interaction.reply({ content: 'Este comando só pode ser usado em um servidor.', ...ephemeral() });
     return;
   }
   const profile = await store.getActiveProfile(interaction.guildId);
   const subcommand = interaction.options.getSubcommand();
-  if (interaction.commandName === 'shu' && subcommand === 'clear') {
+  if (interaction.commandName === 'coneondeficaconfig') {
+    if (!canConfigure(interaction, profile, 'channels')) {
+      await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
+      return;
+    }
+    if (subcommand !== 'add') return;
+    const channelId = interaction.options.getString('id', true).trim();
+    const channelName = interaction.options.getString('nome', true).trim();
+    if (!/^\d{17,20}$/.test(channelId) || !channelName || channelName.length > 100) {
+      await interaction.reply({ content: 'Informe um ID de canal válido e um nome de até 100 caracteres.', ...ephemeral() });
+      return;
+    }
+    const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    if (!channel?.isTextBased()) {
+      await interaction.reply({ content: 'Canal não encontrado neste servidor.', ...ephemeral() });
+      return;
+    }
+    let updated = false;
+    await store.updateActiveProfile(interaction.guildId, (current) => {
+      const existing = current.general.customChannels.find((entry) => entry.id === channelId);
+      if (existing) {
+        existing.name = channelName;
+        updated = true;
+      } else {
+        current.general.customChannels.push({ id: channelId, name: channelName });
+      }
+    });
+    await interaction.reply({
+      content: `${updated ? 'Canal atualizado' : 'Canal adicionado'}: ${channelName} → <#${channelId}>.`,
+      ...ephemeral(),
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+  if (interaction.commandName === 'cone' && ['onde-fica', 'visor'].includes(subcommand)) {
+    if (subcommand === 'onde-fica') {
+      const channelName = interaction.options.getString('nome')?.trim();
+      const content = channelName
+        ? getLocationReply(`ondefica ${channelName}`, true, profile) || `Não encontrei o canal **${channelName}**.`
+        : getChannelsMessage(profile);
+      await interaction.reply({ content, allowedMentions: { parse: [] } });
+      return;
+    }
+    if (subcommand !== 'visor') return;
+    const isServerOwner = interaction.guild.ownerId === interaction.user.id;
+    const isAdministrator = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+      || interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+    if (!isServerOwner && !isAdministrator
+      && !canAccessAdminArea(interaction.member, interaction.user.id, profile, 'general')) {
+      await interaction.reply({ content: 'Você não possui permissão para utilizar este comando.', ...ephemeral() });
+      return;
+    }
+    const targetId = interaction.options.getString('id', true).trim();
+    if (!/^\d{17,20}$/.test(targetId)) {
+      await interaction.reply({ content: 'Membro não encontrado.', ...ephemeral() });
+      return;
+    }
+    const target = await interaction.guild.members.fetch(targetId).catch(() => null);
+    if (!target) {
+      await interaction.reply({ content: 'Membro não encontrado.', ...ephemeral() });
+      return;
+    }
+    const roles = [...(target.roles?.cache?.values?.() || [])]
+      .filter((role) => role.id !== interaction.guild.id)
+      .sort((left, right) => right.position - left.position);
+    const permissionLabels = [
+      [PermissionFlagsBits.Administrator, 'Administrador'],
+      [PermissionFlagsBits.ManageGuild, 'Gerenciar servidor'],
+      [PermissionFlagsBits.ManageChannels, 'Gerenciar canais'],
+      [PermissionFlagsBits.ManageRoles, 'Gerenciar cargos'],
+      [PermissionFlagsBits.ManageMessages, 'Gerenciar mensagens'],
+      [PermissionFlagsBits.ModerateMembers, 'Moderar membros'],
+      [PermissionFlagsBits.KickMembers, 'Expulsar membros'],
+      [PermissionFlagsBits.BanMembers, 'Banir membros'],
+      [PermissionFlagsBits.ManageWebhooks, 'Gerenciar webhooks'],
+      [PermissionFlagsBits.MentionEveryone, 'Mencionar @everyone/@here'],
+      [PermissionFlagsBits.ViewAuditLog, 'Ver registro de auditoria'],
+    ];
+    const permissions = permissionLabels
+      .filter(([permission]) => target.permissions?.has?.(permission))
+      .map(([, label]) => label);
+    const embed = new EmbedBuilder()
+      .setColor(EMBED_COLORS.primary)
+      .setTitle('👁️ Visor de Membro')
+      .addFields(
+        { name: '👤 Usuário', value: `${target.displayName || target.user.globalName || target.user.username}\n@${target.user.username}\n<@${target.id}>`, inline: true },
+        { name: '🆔 ID', value: target.id, inline: true },
+        { name: '📅 Entrada no servidor', value: target.joinedAt ? `<t:${Math.floor(target.joinedAt.getTime() / 1000)}:F>` : 'Indisponível', inline: true },
+        { name: '📊 Status', value: ({ online: 'Online', idle: 'Ausente', dnd: 'Não perturbe', offline: 'Offline' })[target.presence?.status] || 'Indisponível', inline: true },
+        { name: '🤖 Conta', value: target.user.bot ? 'Bot' : 'Usuário', inline: true },
+      );
+    const roleLines = roles.map((role) => `• ${role.name}`);
+    const roleChunks = [];
+    let roleChunk = '';
+    for (const line of roleLines) {
+      if (roleChunk && `${roleChunk}\n${line}`.length > 900) {
+        roleChunks.push(roleChunk);
+        roleChunk = '';
+      }
+      roleChunk = roleChunk ? `${roleChunk}\n${line}` : line;
+    }
+    if (roleChunk) roleChunks.push(roleChunk);
+    const visibleRoleChunks = roleChunks.slice(0, 5);
+    const fields = visibleRoleChunks.map((value, index) => ({
+      name: index === 0 ? '🏷️ Cargos' : '🏷️ Cargos (continuação)',
+      value,
+    }));
+    if (!fields.length) fields.push({ name: '🏷️ Cargos', value: 'Nenhum cargo além de @everyone.' });
+    if (roleChunks.length > visibleRoleChunks.length) {
+      const shownRoles = visibleRoleChunks.reduce((count, chunk) => count + chunk.split('\n').length, 0);
+      fields.at(-1).value += `\n… mais ${roles.length - shownRoles} cargo(s), limitados pelo tamanho do embed.`;
+    }
+    fields.push({ name: '🔐 Permissões', value: permissions.join('\n') || 'Nenhuma permissão privilegiada identificada.' });
+    embed.addFields(fields);
+    await interaction.reply({ embeds: [embed], ...ephemeral(), allowedMentions: { parse: [] } });
+    return;
+  }
+  if (interaction.commandName === 'cone' && subcommand === 'clear') {
     await handleClearCommand(interaction, store);
     return;
   }
@@ -731,10 +1190,8 @@ async function handleChatCommand(interaction, store) {
     await handleAdminSlashCommand(interaction, store);
     return;
   }
-  if (['oi', 'ping', 'help', 'commands', 'status', 'canais', 'ondefica', 'speak', 'saladofuturo', 'cmsp', 'sala-do-futuro'].includes(subcommand)) {
-    const text = subcommand === 'ondefica'
-      ? `ondefica ${interaction.options.getString('nome', true)}`
-      : subcommand;
+  if (['ping', 'help', 'commands', 'status', 'canais'].includes(subcommand)) {
+    const text = subcommand;
     const payload = await dispatchSpeakText(text, {
       format: 'slash',
       guildId: interaction.guildId,
@@ -754,7 +1211,7 @@ async function handleChatCommand(interaction, store) {
       return;
     }
     await interaction.reply({ content: 'Configuração administrativa SPEAK', components: configMenu(interaction.user.id), ...ephemeral() });
-  } else if (subcommand === 'painel' && ['apoiador', 'speak'].includes(interaction.commandName)) {
+  } else if (subcommand === 'painel' && ['apoiador', 'cone'].includes(interaction.commandName)) {
     if (!canConfigure(interaction, profile, 'panel')) {
       await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
       return;
@@ -762,7 +1219,7 @@ async function handleChatCommand(interaction, store) {
     const version = interaction.options.getString?.('versao') || 'normal';
     const archive = profile.workspace?.archive;
     if (version === 'v2' && !archive?.data) {
-      await interaction.reply({ content: 'Integre um arquivo ZIP em /speak config → SPEAK → Arquivos salvos antes de publicar o painel V2.', ...ephemeral() });
+      await interaction.reply({ content: 'Integre um arquivo ZIP em /cone config → Workspace → Arquivos salvos antes de publicar o painel V2.', ...ephemeral() });
       return;
     }
     const channel = interaction.options.getChannel('canal');
@@ -798,17 +1255,17 @@ async function handleChatCommand(interaction, store) {
       current.panel.channelId = channel.id;
     });
     await interaction.reply({ content: `Painel enviado para ${channel}.`, ...ephemeral() });
-  } else if (subcommand === 'login') {
-    await showLogin(interaction, profile);
-  } else if (subcommand === 'reset') {
-    await showReset(interaction);
   } else if (subcommand === 'ticket') {
-    await createTicket(interaction, profile);
+    await createTicket(interaction, profile, store);
   }
 }
 
-async function handlePrefixWorkflow(message, store = configStore) {
-  const match = message.content.trim().match(/^!s\s+(config|painel|login|reset|ticket)(?:\s+([\s\S]+))?$/i);
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function handlePrefixWorkflow(message, store = configStore, prefix = '!cone') {
+  const match = message.content.trim().match(new RegExp(`^${escapeRegex(prefix)}\\s+(config|painel|ticket)(?:\\s+([\\s\\S]+))?$`, 'i'));
   if (!match) return false;
   const command = match[1].toLowerCase();
   let panelChannel = null;
@@ -816,7 +1273,7 @@ async function handlePrefixWorkflow(message, store = configStore) {
   if (command === 'painel') {
     const panelArgs = (match[2] || '').trim().match(/^(?:<#(\d{17,20})>|(\d{17,20}))(?:\s+(normal|v2))?$/i);
     if (!panelArgs) {
-      await message.reply('Uso: !s painel <#canal> [normal|v2]');
+      await message.reply('Uso: !cone painel <#canal> [normal|v2]');
       return true;
     }
     panelChannel = await message.guild.channels.fetch(panelArgs[1] || panelArgs[2]).catch(() => null);
@@ -829,7 +1286,7 @@ async function handlePrefixWorkflow(message, store = configStore) {
 
   let lastReply;
   const interaction = {
-    commandName: 'speak',
+    commandName: 'cone',
     guildId: message.guild.id,
     guild: message.guild,
     channel: message.channel,
@@ -927,8 +1384,8 @@ async function handleClearCommand(interaction, store, { schedule = setTimeout, n
   confirmationTimer?.unref?.();
 }
 
-async function handlePrefixClear(message, store = configStore, options = {}) {
-  const match = message.content.trim().match(/^!s\s+clear(?:\s+([\s\S]+))?$/i);
+async function handlePrefixClear(message, store = configStore, options = {}, prefix = '!cone') {
+  const match = message.content.trim().match(new RegExp(`^${escapeRegex(prefix)}\\s+clear(?:\\s+([\\s\\S]+))?$`, 'i'));
   if (!match) return false;
   let confirmationMessage;
   const interaction = {
@@ -1049,7 +1506,7 @@ async function handleComponent(interaction, store) {
       return;
     }
     const allowed = section === 'permissions'
-      ? isSpeakStaff(interaction.member)
+      ? isSpeakStaff(interaction.member, profile)
       : canConfigure(interaction, profile, configArea(section));
     if (!allowed) {
       await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
@@ -1057,6 +1514,17 @@ async function handleComponent(interaction, store) {
     }
     if (section === 'plans') {
       await interaction.update({ content: 'Planos SPEAK', components: buildPlanMenu(profile) });
+      return;
+    }
+    if (section === 'links') {
+      await interaction.update({
+        content: '🔗 Vínculos ainda não está disponível. A configuração por servidor está preservada para uma etapa futura.',
+        components: [],
+      });
+      return;
+    }
+    if (section === 'channels') {
+      await interaction.update({ content: 'Escolha o grupo de canais para configurar.', components: subMenu('channels') });
       return;
     }
     if (section === 'ticket') {
@@ -1151,17 +1619,20 @@ async function handleComponent(interaction, store) {
     await interaction.update({ content: `**${pending.archive.name}** integrado ao workspace do painel SPEAK V2.`, components: [] });
     return;
   }
+  if (interaction.customId.startsWith('speak:config:tickets:')) {
+    if (await handleTicketConfigButton(interaction, store)) return;
+  }
   if (interaction.customId.startsWith('speak:config:coupons') || interaction.customId.startsWith('speak:coupon:')) {
     const handled = await handleCouponComponent(interaction, store);
     if (handled) return;
   }
   if (interaction.customId === 'speak:config:permissions:area') {
-    if (!isSpeakStaff(interaction.member)) {
+    const profile = await store.getActiveProfile(interaction.guildId);
+    if (!isSpeakStaff(interaction.member, profile)) {
       await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
       return;
     }
     const area = interaction.values[0];
-    const profile = await store.getActiveProfile(interaction.guildId);
     await showConfigModal(interaction, profile, 'permissions', area);
     return;
   }
@@ -1182,7 +1653,11 @@ async function handleComponent(interaction, store) {
   }
   if (interaction.customId.startsWith('speak:ticket:')) {
     const profile = await store.getActiveProfile(interaction.guildId);
-    await handleTicketButton(interaction, profile);
+    if (interaction.customId === 'speak:ticket:open') {
+      await createTicket(interaction, profile, store);
+      return;
+    }
+    await handleTicketButton(interaction, profile, store);
     return;
   }
   if (['speak:payment', 'speak:coupon', 'speak:support', 'speak:login', 'speak:reset'].includes(interaction.customId)) {
@@ -1195,9 +1670,9 @@ async function parseOwnerCommand(interaction, commandText, store) {
   const text = commandText.trim();
   if (!text) throw new Error('Comando vazio.');
 
-  if (/^!s\s+ver\b/i.test(text)) {
-    const match = text.match(/^!s\s+ver\s+(?:<@!?([0-9]{17,20})>|([0-9]{17,20}))$/i);
-    if (!match) throw new Error('Uso: !s ver <id ou menção>');
+  if (/^!cone\s+ver\b/i.test(text)) {
+    const match = text.match(/^!cone\s+ver\s+(?:<@!?([0-9]{17,20})>|([0-9]{17,20}))$/i);
+    if (!match) throw new Error('Uso: !cone ver <id ou menção>');
     const userId = match[1] || match[2];
     const profile = await store.getActiveProfile(interaction.guildId);
     const guild = interaction.guild;
@@ -1208,9 +1683,9 @@ async function parseOwnerCommand(interaction, commandText, store) {
     return `Histórico do usuário ${userId} enviado por DM.`;
   }
 
-  if (/^!s\s+an[úu]ncio\b/i.test(text) || /^!s\s+anuncio\b/i.test(text)) {
-    const match = text.match(/^!s\s+an[úu]ncio\s+([0-9]{17,20})\s+(.+)$/i);
-    if (!match) throw new Error('Uso: !s anúncio <id do canal> <mensagem>');
+  if (/^!cone\s+an[úu]ncio\b/i.test(text) || /^!cone\s+anuncio\b/i.test(text)) {
+    const match = text.match(/^!cone\s+an[úu]ncio\s+([0-9]{17,20})\s+(.+)$/i);
+    if (!match) throw new Error('Uso: !cone anúncio <id do canal> <mensagem>');
     const channelId = match[1];
     const message = match[2].trim();
     const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
@@ -1219,9 +1694,9 @@ async function parseOwnerCommand(interaction, commandText, store) {
     return `Anúncio enviado para ${channel}.`;
   }
 
-  if (/^!s\s+promo[çc]ao\b/i.test(text) || /^!s\s+promocao\b/i.test(text)) {
-    const match = text.match(/^!s\s+promo[çc]ao\s+([0-9]{17,20})\s+(.+)$/i);
-    if (!match) throw new Error('Uso: !s promoção <id do canal> <mensagem>');
+  if (/^!cone\s+promo[çc]ao\b/i.test(text) || /^!cone\s+promocao\b/i.test(text)) {
+    const match = text.match(/^!cone\s+promo[çc]ao\s+([0-9]{17,20})\s+(.+)$/i);
+    if (!match) throw new Error('Uso: !cone promoção <id do canal> <mensagem>');
     const channelId = match[1];
     const message = match[2].trim();
     const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
@@ -1263,7 +1738,7 @@ async function parseOwnerCommand(interaction, commandText, store) {
     }
   }
 
-  throw new Error('Comando não reconhecido. Ex.: !s ver <id>, !s anúncio <id do canal> mensagem, kick/ban/mute <id>.');
+  throw new Error('Comando não reconhecido. Ex.: !cone ver <id>, !cone anúncio <id do canal> mensagem, kick/ban/mute <id>.');
 }
 
 async function handleModal(interaction, store) {
@@ -1287,7 +1762,7 @@ async function handleModal(interaction, store) {
     const profile = await store.getActiveProfile(interaction.guildId);
     const ownerId = interaction.channel?.topic?.match(/^speak-ticket:(\d+)(?::\d+)?$/)?.[1];
     const isOwner = interaction.user.id === ownerId;
-    const isStaff = isSpeakStaff(interaction.member)
+    const isStaff = isSpeakStaff(interaction.member, profile)
       || hasStaffRole(interaction.member, profile.ticket.staffRoleIds)
       || interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels);
     if ((!isOwner && !isStaff) || !ownerId) {
@@ -1341,13 +1816,23 @@ async function handleModal(interaction, store) {
     const [, , , section, subsection] = interaction.customId.split(':');
     const profile = await store.getActiveProfile(interaction.guildId);
     const allowed = section === 'permissions'
-      ? isSpeakStaff(interaction.member)
+      ? isSpeakStaff(interaction.member, profile)
       : canConfigure(interaction, profile, configArea(section));
     if (!allowed) {
       await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
       return;
     }
     await saveConfig(interaction, section, subsection, store);
+    return;
+  }
+  if (interaction.customId.startsWith('speak:config:tickets:save:')) {
+    const action = interaction.customId.split(':').at(-1);
+    const profile = await store.getActiveProfile(interaction.guildId);
+    if (!canConfigure(interaction, profile, 'tickets')) {
+      await interaction.reply({ content: STAFF_DENIED_MESSAGE, ...ephemeral() });
+      return;
+    }
+    await saveTicketConfig(interaction, action, store);
   }
 }
 

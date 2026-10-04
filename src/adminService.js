@@ -12,7 +12,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 
-const { canAccessAdminArea, canManageSpeak, isSpeakStaff, STAFF_DENIED_MESSAGE } = require('./permissions');
+const { canAccessAdminArea, canManageSpeak, STAFF_DENIED_MESSAGE } = require('./permissions');
 const { EMBED_COLORS } = require('./config/defaults');
 
 const ACTION_TTL_MS = 15 * 60 * 1000;
@@ -106,7 +106,7 @@ function canManageTarget(guild, member) {
 }
 
 async function adminLogChannel(guild, profile) {
-  if (!profile.admin.logChannelId) throw new Error('Configure primeiro o canal de logs administrativos em /speak config → Geral.');
+  if (!profile.admin.logChannelId) throw new Error('Configure primeiro o canal de logs administrativos em /cone config → Geral.');
   const channel = await guild.channels.fetch(profile.admin.logChannelId).catch(() => null);
   if (!channel?.isTextBased() || !channel.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.SendMessages)) {
     throw new Error('O canal de logs administrativos está inválido ou o bot não pode enviar mensagens nele.');
@@ -408,11 +408,11 @@ function historyPayload({ guildId, userId, executorId, user, targetMember, profi
 }
 
 async function showUserHistory({ guild, userId, executorId, member: executorMember, reply }, store) {
-  if (!isSpeakStaff(executorMember)) {
+  const profile = await store.getActiveProfile(guild.id);
+  if (!canAccessAdminArea(executorMember, executorId, profile, 'general')) {
     await reply({ content: STAFF_DENIED_MESSAGE, allowedMentions: { parse: [] } });
     return false;
   }
-  const profile = await store.getActiveProfile(guild.id);
   const targetMember = await fetchMember(guild, userId);
   const user = targetMember?.user ?? await guild.client.users.fetch(userId).catch(() => null);
   const queriedAt = new Date().toISOString();
@@ -442,31 +442,32 @@ async function handleHistoryComponent(interaction, store) {
     return true;
   }
   const executorMember = interaction.member ?? await guild.members.fetch(executorId).catch(() => null);
-  if (!isSpeakStaff(executorMember)) {
+  const profile = await store.getActiveProfile(guildId);
+  if (!canAccessAdminArea(executorMember, executorId, profile, 'general')) {
     await interaction.reply({ content: STAFF_DENIED_MESSAGE, flags: 64 });
     return true;
   }
   const section = isSelect ? interaction.values[0] : parts[6];
   const page = isSelect ? 0 : Number(parts[7]);
-  const profile = await store.getActiveProfile(guildId);
   const targetMember = await fetchMember(guild, userId);
   const user = targetMember?.user ?? await guild.client.users.fetch(userId).catch(() => null);
   await interaction.update(historyPayload({ guildId, userId, executorId, user, targetMember, profile, section, page }));
   return true;
 }
 
-async function handleAdminMessage(message, store) {
+async function handleAdminMessage(message, store, prefix = '!cone') {
   if (message.author.bot || message.webhookId || !message.guild) return false;
-  const match = message.content.trim().match(/^!s\s+(up|down|demote|ver|anúncio|anuncio|promoção|promocao)\s+([\s\S]+)$/iu);
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = message.content.trim().match(new RegExp(`^${escapedPrefix}\\s+(up|down|demote|ver|anúncio|anuncio|promoção|promocao)\\s+([\\s\\S]+)$`, 'iu'));
   if (!match) return false;
 
   let command = match[1].toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (command === 'down') command = 'demote';
   const args = match[2].trim();
-  return executeAdminCommand(message, command, args, store);
+  return executeAdminCommand(message, command, args, store, prefix);
 }
 
-async function executeAdminCommand(message, command, args, store) {
+async function executeAdminCommand(message, command, args, store, prefix = '!cone') {
   const profile = await store.getActiveProfile(message.guild.id);
   const area = command === 'up' || command === 'demote' || command === 'ver'
     ? null
@@ -486,7 +487,7 @@ async function executeAdminCommand(message, command, args, store) {
   if (command === 'ver') {
     const targetMatch = args.match(/^(?:<@!?(\d{17,20})>|(\d{17,20}))$/);
     if (!targetMatch) {
-      await message.reply({ content: 'Uso: !s ver <ID ou menção do usuário>', allowedMentions: { parse: [] } });
+      await message.reply({ content: `Uso: ${prefix} ver <ID ou menção do usuário>`, allowedMentions: { parse: [] } });
       return true;
     }
     const targetId = targetMatch[1] || targetMatch[2];
@@ -526,7 +527,7 @@ async function executeAdminCommand(message, command, args, store) {
   const targetMatch = args.match(/^(\d{17,20})\s+([\s\S]+)$/);
   if (!targetMatch) {
     await message.reply({
-      content: `Uso: !s ${command} <ID do usuário> <motivo>`,
+      content: `Uso: ${prefix} ${command} <ID do usuário> <motivo>`,
       allowedMentions: { parse: [] },
     });
     return true;
@@ -658,7 +659,7 @@ async function handleAdminSlashCommand(interaction, store) {
     author: interaction.user,
     member: interaction.member,
     guild: interaction.guild,
-    content: `!s ${command} ${args}`,
+    content: `!cone ${command} ${args}`,
     reply: interactionReply,
     channel: {
       id: interaction.channelId,
@@ -671,7 +672,7 @@ async function handleAdminSlashCommand(interaction, store) {
 
 async function grantPlan(interaction, store, actionId, planId) {
   const pending = await getPendingAction(store, interaction.guildId, actionId);
-  if (!pending || pending.action.type !== 'up') throw new Error('Esta solicitação expirou. Execute !s up novamente.');
+  if (!pending || pending.action.type !== 'up') throw new Error('Esta solicitação expirou. Execute !cone up novamente.');
   const lockKey = `${interaction.guildId}:${pending.action.targetId}:${planId}`;
   const actionLockKey = `${interaction.guildId}:action:${actionId}`;
   if (grantLocks.has(lockKey) || grantLocks.has(actionLockKey)) throw new Error('Esta concessão já está sendo processada.');
@@ -778,7 +779,7 @@ async function handlePromotion(interaction, store, actionId, choice) {
 
 async function publishPromotion(interaction, store, actionId, choice) {
   const pending = await getPendingAction(store, interaction.guildId, actionId);
-  if (!pending || pending.action.type !== 'promotion') throw new Error('Esta confirmação expirou. Execute !s promoção novamente.');
+  if (!pending || pending.action.type !== 'promotion') throw new Error('Esta confirmação expirou. Execute !cone promoção novamente.');
   const { profile, action } = pending;
   if (interaction.user.id !== action.executorId
     || !canAccessAdminArea(interaction.member, interaction.user.id, profile, 'promotions')) {

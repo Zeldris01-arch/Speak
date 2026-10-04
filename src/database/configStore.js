@@ -8,11 +8,38 @@ const DEFAULT_CONFIG_PATH = path.join(process.cwd(), 'data', 'guild-config.json'
 function normalizeProfile(profile = {}) {
   const defaults = createDefaultProfile();
   const normalized = { ...defaults, ...profile };
-  for (const key of ['general', 'panel', 'payment', 'ticket', 'ai', 'permissions', 'admin', 'emojis', 'announcements', 'promotions']) {
+  for (const key of ['general', 'panel', 'payment', 'ticket', 'ai', 'permissions', 'admin', 'emojis', 'announcements', 'promotions', 'security']) {
     normalized[key] = { ...defaults[key], ...(profile[key] ?? {}) };
   }
+  normalized.security.antiRaid = { ...defaults.security.antiRaid, ...(profile.security?.antiRaid ?? {}) };
+  normalized.security.antiSpam = { ...defaults.security.antiSpam, ...(profile.security?.antiSpam ?? {}) };
+  normalized.security.antiFlood = { ...defaults.security.antiFlood, ...(profile.security?.antiFlood ?? {}) };
+  normalized.security.antiLink = { ...defaults.security.antiLink, ...(profile.security?.antiLink ?? {}) };
+  normalized.security.antiInvite = { ...defaults.security.antiInvite, ...(profile.security?.antiInvite ?? {}) };
+  normalized.security.antiBot = { ...defaults.security.antiBot, ...(profile.security?.antiBot ?? {}) };
+  normalized.security.mentionProtection = { ...defaults.security.mentionProtection, ...(profile.security?.mentionProtection ?? {}) };
+  normalized.security.blockedWords = { ...defaults.security.blockedWords, ...(profile.security?.blockedWords ?? {}) };
+  normalized.security.lockdown = { ...defaults.security.lockdown, ...(profile.security?.lockdown ?? {}) };
+  normalized.security.logChannelId ??= defaults.security.logChannelId;
+  normalized.security.blockedWords.words = Array.isArray(profile.security?.blockedWords?.words)
+    ? profile.security.blockedWords.words.map((word) => String(word).trim()).filter(Boolean)
+    : defaults.security.blockedWords.words;
+  normalized.security.antiLink.allowedDomains = Array.isArray(profile.security?.antiLink?.allowedDomains)
+    ? profile.security.antiLink.allowedDomains.map((value) => String(value).trim()).filter(Boolean)
+    : defaults.security.antiLink.allowedDomains;
+  normalized.security.antiLink.ignoredChannels = Array.isArray(profile.security?.antiLink?.ignoredChannels)
+    ? profile.security.antiLink.ignoredChannels.filter((value) => /^\d{17,20}$/.test(String(value)))
+    : defaults.security.antiLink.ignoredChannels;
+  normalized.security.antiInvite.ignoredChannels = Array.isArray(profile.security?.antiInvite?.ignoredChannels)
+    ? profile.security.antiInvite.ignoredChannels.filter((value) => /^\d{17,20}$/.test(String(value)))
+    : defaults.security.antiInvite.ignoredChannels;
+  normalized.general.channelIds = { ...defaults.general.channelIds, ...(profile.general?.channelIds ?? {}) };
+  normalized.general.customChannels = Array.isArray(profile.general?.customChannels)
+    ? profile.general.customChannels.filter((channel) => channel && /^\d{17,20}$/.test(channel.id) && typeof channel.name === 'string')
+    : [];
   normalized.ticket.callCooldowns ??= {};
   normalized.ticket.ratings = Array.isArray(normalized.ticket.ratings) ? normalized.ticket.ratings : [];
+  normalized.ticket.records = Array.isArray(normalized.ticket.records) ? normalized.ticket.records : [];
   normalized.permissions.areas = { ...defaults.permissions.areas, ...(profile.permissions?.areas ?? {}) };
   for (const [area, areaDefaults] of Object.entries(defaults.permissions.areas)) {
     normalized.permissions.areas[area] = {
@@ -21,10 +48,8 @@ function normalizeProfile(profile = {}) {
     };
   }
   normalized.admin.pendingActions ??= {};
-  if ([
-    'Não tenho essa informação no momento. Procure a equipe responsável pelo atendimento.',
-    'Amigo não sei responder isso, va no canal <#1536216193621430384> | lembra ok',
-  ].includes(normalized.ai.fallbackMessage)) {
+  if (/^Amigo, não sei responder isso KKK 😭 Vai no <#\d{17,20}> que eles te salvam\.$/.test(normalized.ai.fallbackMessage)
+    || /^Amigo não sei responder isso, va no canal <#\d{17,20}> \| lembra ok$/.test(normalized.ai.fallbackMessage)) {
     normalized.ai.fallbackMessage = defaults.ai.fallbackMessage;
   }
   if (normalized.panel.color?.toLowerCase() === '#5865f2') normalized.panel.color = '#FFFFFF';

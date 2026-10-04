@@ -1,21 +1,21 @@
 const SERVER_CHANNELS = Object.freeze({
-  aiHelp: { id: '1536216193621430384', name: 'Ajuda IA', emoji: '💬' },
-  nightExpansion: { id: '1536216161291866223', name: 'Expansão Noturna', emoji: '🌙' },
-  tasks: { id: '1549732420507406346', name: 'Tarefas', emoji: '📋' },
-  general: { id: '1536216132162424912', name: 'Geral', emoji: '💬' },
-  commands: { id: '1536216147421167636', name: 'Comandos', emoji: '🧭' },
-  handouts: { id: '1536216187241889832', name: 'Apostilas', emoji: '📚' },
-  essays: { id: '1536216158389145632', name: 'Redação', emoji: '📝' },
-  speak: { id: '1536216154744291379', name: 'SPEAK', emoji: '🎤' },
-  matific: { id: '1536216176089243668', name: 'Matific', emoji: '🧮' },
-  khanAcademy: { id: '1536216163959185499', name: 'Khan Academy', emoji: '📖' },
-  reportCard: { id: '1545518119580074104', name: 'Boletim', emoji: '📊' },
-  professionalEducation: { id: '1536216170393509971', name: 'Educação Profissional', emoji: '💼' },
-  preparaSp: { id: '1536216173266346044', name: 'Prepara SP', emoji: '📘' },
-  alura: { id: '1536470011558760508', name: 'Alura', emoji: '💻' },
-  openEnglish: { id: '1536470082983821424', name: 'Open English', emoji: '🇬🇧' },
-  leia: { id: '1538240309132009623', name: 'Leia', emoji: '📖' },
-  media: { id: '1536216135173939231', name: 'Mídia', emoji: '🖼️' },
+  aiHelp: { name: 'Ajuda IA', emoji: '💬' },
+  nightExpansion: { name: 'Expansão Noturna', emoji: '🌙' },
+  tasks: { name: 'Tarefas', emoji: '📋' },
+  general: { name: 'Geral', emoji: '💬' },
+  commands: { name: 'Comandos', emoji: '🧭' },
+  handouts: { name: 'Apostilas', emoji: '📚' },
+  essays: { name: 'Redação', emoji: '📝' },
+  speak: { name: 'SPEAK', emoji: '🎤' },
+  matific: { name: 'Matific', emoji: '🧮' },
+  khanAcademy: { name: 'Khan Academy', emoji: '📖' },
+  reportCard: { name: 'Boletim', emoji: '📊' },
+  professionalEducation: { name: 'Educação Profissional', emoji: '💼' },
+  preparaSp: { name: 'Prepara SP', emoji: '📘' },
+  alura: { name: 'Alura', emoji: '💻' },
+  openEnglish: { name: 'Open English', emoji: '🇬🇧' },
+  leia: { name: 'Leia', emoji: '📖' },
+  media: { name: 'Mídia', emoji: '🖼️' },
 });
 
 const EMBED_COLORS = Object.freeze({
@@ -27,6 +27,9 @@ const DEFAULT_PROFILE = {
   general: {
     serviceName: 'SPEAK',
     supportMessage: '',
+    prefix: '!cone',
+    channelIds: Object.fromEntries(Object.keys(SERVER_CHANNELS).map((key) => [key, ''])),
+    customChannels: [],
   },
   panel: {
     title: 'SPEAK',
@@ -81,11 +84,12 @@ const DEFAULT_PROFILE = {
     callsEnabled: true,
     preventDuplicates: true,
     deleteAfterClose: false,
-    namePrefix: 'shu',
+    namePrefix: 'cone',
     initialMessage: '🎫 Central de Atendimento',
     closingMessage: 'Este ticket foi fechado pela equipe.',
     closeButtonLabel: 'Fechar',
-    staffRoleIds: ['1536253284309008445'],
+    records: [],
+    staffRoleIds: [],
     callCooldowns: {},
     ratings: [],
   },
@@ -98,7 +102,7 @@ const DEFAULT_PROFILE = {
     model: 'z-ai/glm-5.3',
     channelId: '',
     allowedChannels: [],
-    fallbackMessage: `Amigo, não sei responder isso KKK 😭 Vai no <#${SERVER_CHANNELS.aiHelp.id}> que eles te salvam.`,
+    fallbackMessage: 'Amigo, não sei responder isso KKK 😭 Procure a equipe responsável pelo atendimento.',
     instructions: '',
     knowledge: '',
   },
@@ -113,6 +117,7 @@ const DEFAULT_PROFILE = {
     roleIds: [],
     areas: {
       general: { userIds: [], roleIds: [] },
+      channels: { userIds: [], roleIds: [] },
       panel: { userIds: [], roleIds: [] },
       payments: { userIds: [], roleIds: [] },
       coupons: { userIds: [], roleIds: [] },
@@ -140,6 +145,60 @@ const DEFAULT_PROFILE = {
     logChannelId: '',
     pendingActions: {},
   },
+  security: {
+    logChannelId: '',
+    antiRaid: {
+      enabled: false,
+      memberLimit: 5,
+      intervalSeconds: 10,
+      action: 'alert',
+    },
+    antiSpam: {
+      enabled: false,
+      messages: 5,
+      intervalSeconds: 5,
+      action: 'warn',
+    },
+    antiFlood: {
+      enabled: false,
+      threshold: 5,
+      intervalSeconds: 3,
+      action: 'warn',
+      message: '<@USER_ID> Para de flood, isso pode resultar em punição.',
+    },
+    antiLink: {
+      enabled: false,
+      allowedDomains: [],
+      ignoredChannels: [],
+      ignoredRoles: [],
+      action: 'delete',
+    },
+    antiInvite: {
+      enabled: false,
+      ignoredChannels: [],
+      ignoredRoles: [],
+      action: 'delete',
+    },
+    antiBot: {
+      enabled: false,
+      action: 'log',
+    },
+    mentionProtection: {
+      enabled: false,
+      limit: 5,
+      action: 'delete',
+      ignoredChannels: [],
+      ignoredRoles: [],
+    },
+    blockedWords: {
+      enabled: false,
+      words: [],
+    },
+    lockdown: {
+      enabled: false,
+      channelIds: [],
+    },
+  },
   accounts: {},
 };
 
@@ -156,9 +215,16 @@ function createDefaultGuildConfig() {
   };
 }
 
+function getConfiguredChannel(profile, key) {
+  const channel = SERVER_CHANNELS[key];
+  const id = profile?.general?.channelIds?.[key];
+  return channel && id ? { ...channel, id } : null;
+}
+
 module.exports = {
   EMBED_COLORS,
   SERVER_CHANNELS,
   createDefaultGuildConfig,
   createDefaultProfile,
+  getConfiguredChannel,
 };

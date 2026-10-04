@@ -1,13 +1,13 @@
-const { SERVER_CHANNELS } = require('./config/defaults');
+const { SERVER_CHANNELS, getConfiguredChannel } = require('./config/defaults');
 
 const NIM_CHAT_COMPLETIONS_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const FALLBACK_MESSAGE = `Amigo, não sei responder isso KKK 😭 Vai no <#${SERVER_CHANNELS.aiHelp.id}> que eles te salvam.`;
+const FALLBACK_MESSAGE = 'Amigo, não sei responder isso KKK 😭 Procure a equipe responsável pelo atendimento.';
 const SENSITIVE_VALUE = /(?:senha|password|token|secret|api[\s_-]?key|client[\s_-]?secret)(?:\s*(?::|=)\s*|\s+(?:(?:é|eh|is)\s+)?)\S+|\b(?:mfa\.)?[\w-]{24,}\.[\w-]{6,}\.[\w-]{20,}\b|\bsk-[\w-]{20,}\b|\bRA\s*[:#]\s*[A-Z0-9-]{4,}|\b\d{5,}\s*[-/]?\s*[A-Z]{2}\b|\b[\w.+-]+@[\w.-]+\.[A-Z]{2,}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b(?:\+55\s?)?(?:\(\d{2}\)|\d{2})\s?9?\d{4}-?\d{4}\b/i;
 const DEFAULT_EDUCATIONAL_CONTEXT = [
   'Este é um servidor de apoio educacional. SPEAK significa a plataforma educacional de inglês da rede estadual/Sala do Futuro, não uma empresa ou produto de outro setor.',
   'O servidor também oferece apoio sobre Sala do Futuro, CMSP, Matific, Khan Academy, Apostilas, Redação, Boletim, Tarefas e Expansão Noturna. Não reduza perguntas sobre essas plataformas a SPEAK.',
-  'Canais do servidor (use as menções abaixo para direcionar a pessoa):',
-  ...Object.values(SERVER_CHANNELS).map(({ id, name }) => `<#${id}>: ${name}.`),
+  'Áreas de apoio do servidor; use somente menções de canais configurados no contexto do servidor:',
+  ...Object.values(SERVER_CHANNELS).map(({ name }) => `Canal de ${name}.`),
   'É seguro explicar conceitos educacionais gerais. Não invente links, procedimentos internos, prazos, credenciais ou regras que não estejam nesta base; quando faltar informação, use o fallback exato.',
 ].join('\n');
 const MAX_CONTEXT_MESSAGES = 6;
@@ -23,6 +23,11 @@ function getFallback(aiConfig = {}) {
 
 function buildSafeServerContext(profile = {}) {
   const entries = [];
+  const channels = Object.keys(SERVER_CHANNELS)
+    .map((key) => getConfiguredChannel(profile, key))
+    .filter(Boolean)
+    .map((channel) => `<#${channel.id}>: ${channel.name}`);
+  if (channels.length) entries.push(`Canais deste servidor: ${channels.join('; ')}`);
   const support = profile.general?.supportMessage?.trim();
   if (support && !isSensitivePrompt(support)) entries.push(`Orientação de suporte configurada pela equipe: ${support}`);
 

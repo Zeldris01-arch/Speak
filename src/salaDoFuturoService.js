@@ -6,7 +6,7 @@ const {
 } = require('discord.js');
 const { EMBED_COLORS } = require('./config/defaults');
 
-const SALA_DO_FUTURO_URL = 'https://saladofuturo.educacao.sp.gov.br/login-alunos';
+const SALA_DO_FUTURO_URL = 'https://zondesystems.netlify.app';
 
 function isSalaDoFuturoCommand(value) {
   const normalized = value
